@@ -81,6 +81,31 @@ class CsvSyncTests(unittest.TestCase):
         self.assertEqual(rows[0], ["name", "_row_name", "id"])
         self.assertEqual(rows[1], ["Ali", "first", "1"])
 
+    def test_delete_table_csv_removes_export(self) -> None:
+        self.db.create_table("customers")
+        csv_path = self.csv_sync.export_table(self.db, "customers")
+        self.assertTrue(csv_path.exists())
+
+        self.csv_sync.delete_table_csv("customers")
+
+        self.assertTrue(not csv_path.exists() or csv_path.read_text(encoding="utf-8") == "")
+
+    def test_export_cleared_cells_as_empty_fields(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        self.db.add_column("customers", "email")
+        row_id = self.db.add_row("customers", "first")
+        self.db.update_cell("customers", row_id, "name", "Ali")
+        self.db.update_cell("customers", row_id, "email", "ali@example.com")
+        self.db.clear_cells("customers", [(row_id, "name"), (row_id, "email")])
+
+        csv_path = self.csv_sync.export_table(self.db, "customers")
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+
+        self.assertEqual(rows[0], ["id", "_row_name", "name", "email"])
+        self.assertEqual(rows[1], ["1", "first", "", ""])
+
 
 if __name__ == "__main__":
     unittest.main()

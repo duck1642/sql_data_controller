@@ -44,7 +44,7 @@ class MainWindow(QMainWindow):
         self.table_view = QTableView()
         self.table_view.setModel(self.model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
-        self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table_view.setAlternatingRowColors(True)
         self.configure_draggable_headers()
 
@@ -70,11 +70,13 @@ class MainWindow(QMainWindow):
 
     def configure_draggable_headers(self) -> None:
         horizontal_header = self.table_view.horizontalHeader()
+        horizontal_header.setSectionsClickable(True)
         horizontal_header.setSectionsMovable(True)
         horizontal_header.setFirstSectionMovable(True)
         horizontal_header.sectionMoved.connect(self.on_column_section_moved)
 
         vertical_header = self.table_view.verticalHeader()
+        vertical_header.setSectionsClickable(True)
         vertical_header.setSectionsMovable(True)
         vertical_header.setFirstSectionMovable(True)
         vertical_header.sectionMoved.connect(self.on_row_section_moved)
@@ -88,6 +90,12 @@ class MainWindow(QMainWindow):
         self.create_table_action.triggered.connect(self.create_table)
         toolbar.addAction(self.create_table_action)
 
+        self.delete_table_action = QAction("Delete Table", self)
+        self.delete_table_action.triggered.connect(self.delete_table)
+        toolbar.addAction(self.delete_table_action)
+
+        toolbar.addSeparator()
+
         self.add_row_action = QAction("Add Row", self)
         self.add_row_action.triggered.connect(self.add_row)
         toolbar.addAction(self.add_row_action)
@@ -96,6 +104,16 @@ class MainWindow(QMainWindow):
         self.rename_row_action.triggered.connect(self.rename_row)
         toolbar.addAction(self.rename_row_action)
 
+        self.delete_row_action = QAction("Delete Row", self)
+        self.delete_row_action.triggered.connect(self.delete_row)
+        toolbar.addAction(self.delete_row_action)
+
+        self.empty_cell_action = QAction("Empty Cell", self)
+        self.empty_cell_action.triggered.connect(self.empty_cells)
+        toolbar.addAction(self.empty_cell_action)
+
+        toolbar.addSeparator()
+
         self.add_column_action = QAction("Add Column", self)
         self.add_column_action.triggered.connect(self.add_column)
         toolbar.addAction(self.add_column_action)
@@ -103,6 +121,12 @@ class MainWindow(QMainWindow):
         self.rename_column_action = QAction("Rename Column", self)
         self.rename_column_action.triggered.connect(self.rename_column)
         toolbar.addAction(self.rename_column_action)
+
+        self.delete_column_action = QAction("Delete Column", self)
+        self.delete_column_action.triggered.connect(self.delete_column)
+        toolbar.addAction(self.delete_column_action)
+
+        toolbar.addSeparator()
 
         self.apply_order_action = QAction("Apply Order to New Table", self)
         self.apply_order_action.triggered.connect(self.apply_order_to_new_table)
@@ -165,6 +189,32 @@ class MainWindow(QMainWindow):
         except ValidationError as exc:
             self.show_error(str(exc))
 
+    def delete_table(self) -> None:
+        table = self.require_current_table()
+        if table is None:
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Delete Table",
+            (
+                f"Delete table '{table}' and its CSV mirror?\n\n"
+                "This cannot be undone from inside the app."
+            ),
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.db.delete_table(table)
+            self.csv_sync.delete_table_csv(table)
+            self.model.set_table(None)
+            self.csv_preview.clear()
+            self.refresh_tables()
+            self.show_status(f"Deleted table {table}.")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+
     def add_row(self) -> None:
         table = self.require_current_table()
         if table is None:
@@ -198,6 +248,54 @@ class MainWindow(QMainWindow):
         try:
             self.db.rename_row(table, int(row["id"]), new_name)
             self.sync_and_reload(table, "Renamed row.")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+
+    def delete_row(self) -> None:
+        table = self.require_current_table()
+        rows = self.selected_row_records()
+        if table is None or not rows:
+            return
+
+        row_ids = [int(row["id"]) for row in rows]
+        row_names = [str(row.get("_row_name") or row.get("id")) for row in rows]
+        row_label = row_names[0] if len(row_names) == 1 else f"{len(row_names)} selected rows"
+        confirm = QMessageBox.question(
+            self,
+            "Delete Row",
+            f"Delete {row_label} from '{table}'?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.db.delete_rows(table, row_ids)
+            self.sync_and_reload(table, "Deleted row." if len(row_ids) == 1 else f"Deleted {len(row_ids)} rows.")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+
+    def empty_cells(self) -> None:
+        table = self.require_current_table()
+        if table is None:
+            return
+
+        cells = self.selected_editable_cells()
+        if not cells:
+            self.show_error("Select at least one user cell to empty.")
+            return
+
+        cell_label = "1 cell" if len(cells) == 1 else f"{len(cells)} cells"
+        confirm = QMessageBox.question(
+            self,
+            "Empty Cell",
+            f"Empty {cell_label} in '{table}'?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            cleared = self.db.clear_cells(table, cells)
+            self.sync_and_reload(table, "Emptied cell." if cleared == 1 else f"Emptied {cleared} cells.")
         except ValidationError as exc:
             self.show_error(str(exc))
 
@@ -246,6 +344,60 @@ class MainWindow(QMainWindow):
         try:
             self.db.rename_column(table, old_name, new_name)
             self.sync_and_reload(table, "Renamed column.")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+
+    def delete_column(self) -> None:
+        table = self.require_current_table()
+        if table is None:
+            return
+
+        editable_columns = [column for column in self.model.columns if column not in PROTECTED_COLUMNS]
+        if not editable_columns:
+            self.show_error("There are no user columns to delete.")
+            return
+
+        selected_columns = self.selected_column_names()
+        protected_selected = [column for column in selected_columns if column in PROTECTED_COLUMNS]
+        if protected_selected:
+            self.show_error("Protected columns cannot be deleted. Select only user columns.")
+            return
+
+        columns_to_delete = [column for column in selected_columns if column in editable_columns]
+        if not columns_to_delete:
+            selected_column = self.model.column_name(self.table_view.currentIndex().column())
+            default_index = editable_columns.index(selected_column) if selected_column in editable_columns else 0
+            column_name, ok = QInputDialog.getItem(
+                self,
+                "Delete Column",
+                "Column:",
+                editable_columns,
+                default_index,
+                False,
+            )
+            if not ok:
+                return
+            columns_to_delete = [column_name]
+
+        column_label = (
+            f"column '{columns_to_delete[0]}'"
+            if len(columns_to_delete) == 1
+            else f"{len(columns_to_delete)} selected columns"
+        )
+        confirm = QMessageBox.question(
+            self,
+            "Delete Column",
+            f"Delete {column_label} from '{table}'?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.db.delete_columns(table, columns_to_delete)
+            self.sync_and_reload(
+                table,
+                "Deleted column." if len(columns_to_delete) == 1 else f"Deleted {len(columns_to_delete)} columns.",
+            )
         except ValidationError as exc:
             self.show_error(str(exc))
 
@@ -402,13 +554,64 @@ class MainWindow(QMainWindow):
             self.show_error("Select a valid row first.")
         return row
 
+    def selected_row_records(self) -> list[dict]:
+        selection = self.table_view.selectionModel()
+        selected_indexes = selection.selectedRows() if selection is not None else []
+        row_numbers = sorted({index.row() for index in selected_indexes})
+
+        if not row_numbers:
+            row = self.current_row_record()
+            return [row] if row is not None else []
+
+        rows = [self.model.row_record(row_number) for row_number in row_numbers]
+        return [row for row in rows if row is not None]
+
+    def selected_column_names(self) -> list[str]:
+        selection = self.table_view.selectionModel()
+        selected_indexes = selection.selectedColumns() if selection is not None else []
+        column_numbers = sorted({index.column() for index in selected_indexes})
+        columns = [self.model.column_name(column_number) for column_number in column_numbers]
+        return [column for column in columns if column is not None]
+
+    def selected_editable_cells(self) -> list[tuple[int, str]]:
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return []
+
+        cells: set[tuple[int, str]] = set()
+        user_columns = [column for column in self.model.columns if column not in PROTECTED_COLUMNS]
+
+        for index in selection.selectedIndexes():
+            row = self.model.row_record(index.row())
+            column = self.model.column_name(index.column())
+            if row is not None and column in user_columns:
+                cells.add((int(row["id"]), column))
+
+        for index in selection.selectedRows():
+            row = self.model.row_record(index.row())
+            if row is not None:
+                for column in user_columns:
+                    cells.add((int(row["id"]), column))
+
+        for index in selection.selectedColumns():
+            column = self.model.column_name(index.column())
+            if column in user_columns:
+                for row in self.model.rows:
+                    cells.add((int(row["id"]), column))
+
+        return sorted(cells)
+
     def update_action_state(self) -> None:
         has_table = self.current_table() is not None
         for action in (
+            self.delete_table_action,
             self.add_row_action,
             self.rename_row_action,
+            self.delete_row_action,
+            self.empty_cell_action,
             self.add_column_action,
             self.rename_column_action,
+            self.delete_column_action,
             self.apply_order_action,
         ):
             action.setEnabled(has_table)

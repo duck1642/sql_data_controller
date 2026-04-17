@@ -31,7 +31,14 @@ class CsvSync:
             return ""
         return csv_path.read_text(encoding="utf-8")
 
+    def delete_table_csv(self, table_name: str) -> None:
+        csv_path = self.path_for_table(table_name)
+        if csv_path.exists():
+            try:
+                csv_path.unlink()
+            except PermissionError:
+                csv_path.write_text("", encoding="utf-8")
+
     def path_for_table(self, table_name: str) -> Path:
         name = validate_identifier(table_name, "table name")
         return self.csv_dir / f"{name}.csv"
-

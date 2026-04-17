@@ -128,6 +128,18 @@ class DatabaseController:
             self.connection.rollback()
             raise
 
+    def delete_table(self, table_name: str) -> None:
+        self._require_table(table_name)
+        name = validate_identifier(table_name, "table name")
+        if name.startswith(RESERVED_TABLE_PREFIX):
+            raise ValidationError(f"Table names starting with {RESERVED_TABLE_PREFIX} are protected.")
+        table_sql = quote_identifier(name)
+
+        self.connection.execute(f"DROP TABLE {table_sql}")
+        self.connection.execute(f"DELETE FROM {ROW_ORDER_TABLE} WHERE table_name = ?", (name,))
+        self.connection.execute(f"DELETE FROM {COLUMN_ORDER_TABLE} WHERE table_name = ?", (name,))
+        self.connection.commit()
+
     def get_columns(self, table_name: str) -> list[ColumnInfo]:
         self._require_table(table_name)
         table_sql = quote_identifier(table_name)
@@ -218,6 +230,34 @@ class DatabaseController:
         )
         self.connection.commit()
 
+    def delete_row(self, table_name: str, row_id: int) -> None:
+        self.delete_rows(table_name, [row_id])
+
+    def delete_rows(self, table_name: str, row_ids: list[int]) -> None:
+        self._require_table(table_name)
+        unique_row_ids = sorted({int(row_id) for row_id in row_ids})
+        if not unique_row_ids:
+            raise ValidationError("Select at least one row to delete.")
+        for row_id in unique_row_ids:
+            self._require_row(table_name, row_id)
+
+        table_sql = quote_identifier(table_name)
+        try:
+            self.connection.execute("BEGIN")
+            self.connection.executemany(
+                f"DELETE FROM {table_sql} WHERE id = ?",
+                [(row_id,) for row_id in unique_row_ids],
+            )
+            self.connection.executemany(
+                f"DELETE FROM {ROW_ORDER_TABLE} WHERE table_name = ? AND row_id = ?",
+                [(table_name, row_id) for row_id in unique_row_ids],
+            )
+            self._compact_row_order(table_name)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def add_column(self, table_name: str, column_name: str) -> None:
         self._require_table(table_name)
         name = validate_user_column_name(column_name)
@@ -264,6 +304,36 @@ class DatabaseController:
         )
         self.connection.commit()
 
+    def delete_column(self, table_name: str, column_name: str) -> None:
+        self.delete_columns(table_name, [column_name])
+
+    def delete_columns(self, table_name: str, column_names: list[str]) -> None:
+        self._require_table(table_name)
+        unique_columns = list(dict.fromkeys(validate_identifier(column, "column name") for column in column_names))
+        if not unique_columns:
+            raise ValidationError("Select at least one column to delete.")
+        for column in unique_columns:
+            if column in PROTECTED_COLUMNS:
+                raise ValidationError(f"Column '{column}' is protected.")
+            if column not in self.get_column_names(table_name):
+                raise ValidationError(f"Column '{column}' does not exist.")
+
+        try:
+            self.connection.execute("BEGIN")
+            table_sql = quote_identifier(table_name)
+            for column in unique_columns:
+                column_sql = quote_identifier(column)
+                self.connection.execute(f"ALTER TABLE {table_sql} DROP COLUMN {column_sql}")
+            self.connection.executemany(
+                f"DELETE FROM {COLUMN_ORDER_TABLE} WHERE table_name = ? AND column_name = ?",
+                [(table_name, column) for column in unique_columns],
+            )
+            self._compact_column_order(table_name)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
     def update_cell(self, table_name: str, row_id: int, column_name: str, value: Any) -> None:
         self._require_table(table_name)
         column = validate_identifier(column_name, "column name")
@@ -284,6 +354,36 @@ class DatabaseController:
             (stored_value, row_id),
         )
         self.connection.commit()
+
+    def clear_cells(self, table_name: str, cells: list[tuple[int, str]]) -> int:
+        self._require_table(table_name)
+        columns = set(self.get_column_names(table_name))
+        unique_cells = list(dict.fromkeys((int(row_id), validate_identifier(column, "column name")) for row_id, column in cells))
+        if not unique_cells:
+            raise ValidationError("Select at least one editable cell to empty.")
+
+        for row_id, column in unique_cells:
+            self._require_row(table_name, row_id)
+            if column in PROTECTED_COLUMNS:
+                raise ValidationError(f"Column '{column}' cannot be emptied.")
+            if column not in columns:
+                raise ValidationError(f"Column '{column}' does not exist.")
+
+        table_sql = quote_identifier(table_name)
+        try:
+            self.connection.execute("BEGIN")
+            for row_id, column in unique_cells:
+                column_sql = quote_identifier(column)
+                self.connection.execute(
+                    f"UPDATE {table_sql} SET {column_sql} = NULL WHERE id = ?",
+                    (row_id,),
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+        return len(unique_cells)
 
     def row_name_exists(self, table_name: str, row_name: str, exclude_row_id: int | None = None) -> bool:
         self._require_table(table_name)
@@ -451,6 +551,26 @@ class DatabaseController:
         )
         self.connection.commit()
 
+    def _compact_column_order(self, table_name: str) -> None:
+        rows = self.connection.execute(
+            f"""
+            SELECT column_name
+            FROM {COLUMN_ORDER_TABLE}
+            WHERE table_name = ?
+            ORDER BY position, column_name
+            """,
+            (table_name,),
+        ).fetchall()
+        self.connection.executemany(
+            f"""
+            UPDATE {COLUMN_ORDER_TABLE}
+            SET position = ?
+            WHERE table_name = ?
+              AND column_name = ?
+            """,
+            [(index, table_name, row["column_name"]) for index, row in enumerate(rows)],
+        )
+
     def _sync_row_order(self, table_name: str) -> None:
         table_sql = quote_identifier(table_name)
         row_ids = [
@@ -495,6 +615,26 @@ class DatabaseController:
             inserts,
         )
         self.connection.commit()
+
+    def _compact_row_order(self, table_name: str) -> None:
+        rows = self.connection.execute(
+            f"""
+            SELECT row_id
+            FROM {ROW_ORDER_TABLE}
+            WHERE table_name = ?
+            ORDER BY position, row_id
+            """,
+            (table_name,),
+        ).fetchall()
+        self.connection.executemany(
+            f"""
+            UPDATE {ROW_ORDER_TABLE}
+            SET position = ?
+            WHERE table_name = ?
+              AND row_id = ?
+            """,
+            [(index, table_name, int(row["row_id"])) for index, row in enumerate(rows)],
+        )
 
     def _next_row_position(self, table_name: str) -> int:
         row = self.connection.execute(

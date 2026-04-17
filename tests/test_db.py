@@ -141,6 +141,109 @@ class DatabaseControllerTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.db.create_ordered_copy("customers", "bad name")
 
+    def test_delete_row_removes_row_and_order_metadata(self) -> None:
+        self.db.create_table("customers")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        third_id = self.db.add_row("customers", "third")
+        self.db.reorder_rows("customers", [third_id, first_id, second_id])
+
+        self.db.delete_row("customers", first_id)
+
+        self.assertEqual(
+            [row["_row_name"] for row in self.db.fetch_rows("customers")],
+            ["third", "second"],
+        )
+        with self.assertRaises(ValidationError):
+            self.db.delete_row("customers", first_id)
+
+    def test_delete_rows_removes_multiple_rows(self) -> None:
+        self.db.create_table("customers")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        third_id = self.db.add_row("customers", "third")
+
+        self.db.delete_rows("customers", [first_id, third_id])
+
+        rows = self.db.fetch_rows("customers")
+        self.assertEqual([row["id"] for row in rows], [second_id])
+        self.assertEqual(rows[0]["_row_name"], "second")
+
+    def test_delete_column_removes_user_column_and_order_metadata(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        self.db.add_column("customers", "email")
+        self.db.reorder_columns("customers", ["email", "id", "name", "_row_name"])
+
+        self.db.delete_column("customers", "name")
+
+        self.assertEqual(self.db.get_column_names("customers"), ["email", "id", "_row_name"])
+        self.assertEqual(
+            [column.name for column in self.db.get_columns("customers")],
+            ["id", "_row_name", "email"],
+        )
+
+    def test_delete_columns_removes_multiple_user_columns(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        self.db.add_column("customers", "email")
+        self.db.add_column("customers", "city")
+
+        self.db.delete_columns("customers", ["name", "city"])
+
+        self.assertEqual(self.db.get_column_names("customers"), ["id", "_row_name", "email"])
+        self.assertEqual(
+            [column.name for column in self.db.get_columns("customers")],
+            ["id", "_row_name", "email"],
+        )
+
+    def test_delete_column_rejects_protected_columns(self) -> None:
+        self.db.create_table("customers")
+
+        with self.assertRaises(ValidationError):
+            self.db.delete_column("customers", "id")
+        with self.assertRaises(ValidationError):
+            self.db.delete_column("customers", "_row_name")
+
+    def test_delete_table_removes_table_and_metadata(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        self.db.add_row("customers", "first")
+        self.db.reorder_columns("customers", ["name", "id", "_row_name"])
+
+        self.db.delete_table("customers")
+
+        self.assertEqual(self.db.list_tables(), [])
+        with self.assertRaises(ValidationError):
+            self.db.fetch_rows("customers")
+
+    def test_clear_cells_sets_multiple_user_cells_to_null(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        self.db.add_column("customers", "email")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        self.db.update_cell("customers", first_id, "name", "Ali")
+        self.db.update_cell("customers", first_id, "email", "ali@example.com")
+        self.db.update_cell("customers", second_id, "name", "Ayse")
+
+        cleared = self.db.clear_cells("customers", [(first_id, "name"), (first_id, "email"), (second_id, "name")])
+
+        rows = self.db.fetch_rows("customers")
+        self.assertEqual(cleared, 3)
+        self.assertIsNone(rows[0]["name"])
+        self.assertIsNone(rows[0]["email"])
+        self.assertIsNone(rows[1]["name"])
+
+    def test_clear_cells_rejects_protected_columns(self) -> None:
+        self.db.create_table("customers")
+        row_id = self.db.add_row("customers", "first")
+
+        with self.assertRaises(ValidationError):
+            self.db.clear_cells("customers", [(row_id, "id")])
+        with self.assertRaises(ValidationError):
+            self.db.clear_cells("customers", [(row_id, "_row_name")])
+
 
 if __name__ == "__main__":
     unittest.main()
