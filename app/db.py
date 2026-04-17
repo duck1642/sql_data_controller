@@ -17,6 +17,7 @@ from .validation import (
 
 ROW_ORDER_TABLE = "_sdc_row_order"
 COLUMN_ORDER_TABLE = "_sdc_column_order"
+CHANGE_LOG_TABLE = "_sdc_change_log"
 RESERVED_TABLE_PREFIX = "_sdc_"
 
 
@@ -128,6 +129,30 @@ class DatabaseController:
             self.connection.rollback()
             raise
 
+    def rename_table(self, old_name: str, new_name: str) -> None:
+        self._require_table(old_name)
+        old_table = validate_identifier(old_name, "table name")
+        new_table = self._validate_new_table_name(new_name)
+        if self.table_exists(new_table):
+            raise ValidationError(f"Table '{new_table}' already exists.")
+
+        old_sql = quote_identifier(old_table)
+        new_sql = quote_identifier(new_table)
+        self.connection.execute(f"ALTER TABLE {old_sql} RENAME TO {new_sql}")
+        self.connection.execute(
+            f"UPDATE {ROW_ORDER_TABLE} SET table_name = ? WHERE table_name = ?",
+            (new_table, old_table),
+        )
+        self.connection.execute(
+            f"UPDATE {COLUMN_ORDER_TABLE} SET table_name = ? WHERE table_name = ?",
+            (new_table, old_table),
+        )
+        self.connection.execute(
+            f"UPDATE {CHANGE_LOG_TABLE} SET table_name = ? WHERE table_name = ?",
+            (new_table, old_table),
+        )
+        self.connection.commit()
+
     def delete_table(self, table_name: str) -> None:
         self._require_table(table_name)
         name = validate_identifier(table_name, "table name")
@@ -193,6 +218,10 @@ class DatabaseController:
     def fetch_table_data(self, table_name: str) -> tuple[list[str], list[dict[str, Any]]]:
         return self.get_column_names(table_name), self.fetch_rows(table_name)
 
+    def get_row(self, table_name: str, row_id: int) -> dict[str, Any]:
+        self._require_table(table_name)
+        return self._require_row(table_name, row_id)
+
     def add_row(self, table_name: str, row_name: str | None = None) -> int:
         self._require_table(table_name)
         name = validate_row_name(row_name) if row_name is not None else self._next_row_name(table_name)
@@ -213,6 +242,38 @@ class DatabaseController:
         )
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def insert_row_snapshot(self, table_name: str, row: dict[str, Any], position: int | None = None) -> int:
+        self._require_table(table_name)
+        columns = self.get_column_names(table_name)
+        row_id = int(row["id"])
+        if self.connection.execute(
+            f"SELECT 1 FROM {quote_identifier(table_name)} WHERE id = ?",
+            (row_id,),
+        ).fetchone():
+            raise ValidationError(f"Row id '{row_id}' already exists.")
+
+        insert_columns = [column for column in columns if column in row]
+        if "id" not in insert_columns:
+            insert_columns.insert(0, "id")
+        column_sql = ", ".join(quote_identifier(column) for column in insert_columns)
+        placeholders = ", ".join("?" for _ in insert_columns)
+        values = [row.get(column) for column in insert_columns]
+
+        table_sql = quote_identifier(table_name)
+        self.connection.execute(
+            f"INSERT INTO {table_sql} ({column_sql}) VALUES ({placeholders})",
+            values,
+        )
+        self.connection.execute(
+            f"""
+            INSERT OR REPLACE INTO {ROW_ORDER_TABLE} (table_name, row_id, position)
+            VALUES (?, ?, ?)
+            """,
+            (table_name, row_id, position if position is not None else self._next_row_position(table_name)),
+        )
+        self.connection.commit()
+        return row_id
 
     def rename_row(self, table_name: str, row_id: int, new_row_name: str) -> None:
         self._require_table(table_name)
@@ -257,6 +318,35 @@ class DatabaseController:
         except Exception:
             self.connection.rollback()
             raise
+
+    def get_column_values(self, table_name: str, column_name: str) -> list[dict[str, Any]]:
+        self._require_table(table_name)
+        column = validate_identifier(column_name, "column name")
+        if column not in self.get_column_names(table_name):
+            raise ValidationError(f"Column '{column}' does not exist.")
+        table_sql = quote_identifier(table_name)
+        column_sql = quote_identifier(column)
+        rows = self.connection.execute(
+            f"""
+            SELECT id, {column_sql} AS value
+            FROM {table_sql}
+            ORDER BY id
+            """
+        ).fetchall()
+        return [{"row_id": int(row["id"]), "value": row["value"]} for row in rows]
+
+    def set_column_values(self, table_name: str, column_name: str, values: list[dict[str, Any]]) -> None:
+        self._require_table(table_name)
+        column = validate_identifier(column_name, "column name")
+        if column not in self.get_column_names(table_name):
+            raise ValidationError(f"Column '{column}' does not exist.")
+        table_sql = quote_identifier(table_name)
+        column_sql = quote_identifier(column)
+        self.connection.executemany(
+            f"UPDATE {table_sql} SET {column_sql} = ? WHERE id = ?",
+            [(item.get("value"), int(item["row_id"])) for item in values],
+        )
+        self.connection.commit()
 
     def add_column(self, table_name: str, column_name: str) -> None:
         self._require_table(table_name)
@@ -354,6 +444,31 @@ class DatabaseController:
             (stored_value, row_id),
         )
         self.connection.commit()
+
+    def update_cells_raw(self, table_name: str, cells: list[dict[str, Any]]) -> None:
+        self._require_table(table_name)
+        if not cells:
+            return
+        table_sql = quote_identifier(table_name)
+        try:
+            self.connection.execute("BEGIN")
+            for cell in cells:
+                column = validate_identifier(cell["column"], "column name")
+                if column == "id":
+                    raise ValidationError("The id column is read-only.")
+                if column not in self.get_column_names(table_name):
+                    raise ValidationError(f"Column '{column}' does not exist.")
+                self._require_row(table_name, int(cell["row_id"]))
+                value = self._normalize_cell_value(column, cell.get("value"))
+                column_sql = quote_identifier(column)
+                self.connection.execute(
+                    f"UPDATE {table_sql} SET {column_sql} = ? WHERE id = ?",
+                    (value, int(cell["row_id"])),
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def clear_cells(self, table_name: str, cells: list[tuple[int, str]]) -> int:
         self._require_table(table_name)
@@ -505,6 +620,22 @@ class DatabaseController:
                 column_name TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 PRIMARY KEY (table_name, column_name)
+            )
+            """
+        )
+        self.connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {CHANGE_LOG_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                action TEXT NOT NULL,
+                table_name TEXT,
+                target TEXT,
+                before_json TEXT,
+                after_json TEXT,
+                status TEXT NOT NULL,
+                undoable INTEGER NOT NULL DEFAULT 1,
+                error_text TEXT
             )
             """
         )

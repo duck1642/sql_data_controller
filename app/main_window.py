@@ -1,23 +1,41 @@
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+from io import StringIO
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDockWidget,
+    QFileDialog,
+    QHBoxLayout,
     QInputDialog,
+    QLineEdit,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QSplitter,
     QStatusBar,
     QTabWidget,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
     QToolBar,
+    QVBoxLayout,
+    QWidget,
 )
 
+from .change_log import ChangeLogService
 from .csv_sync import CsvSync
+from .csv_highlighter import CsvSyntaxHighlighter
 from .db import DatabaseController
+from .session import open_session
 from .table_model import DatabaseTableModel
 from .validation import PROTECTED_COLUMNS, ValidationError
 
@@ -27,7 +45,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.db = db
         self.csv_sync = csv_sync
+        self.change_log = ChangeLogService(db, csv_sync)
         self._resetting_headers = False
+        self.last_row_order: list[int] = []
+        self.last_column_order: list[str] = []
 
         self.setWindowTitle("SQL Data Controller")
         self.resize(1100, 700)
@@ -40,6 +61,7 @@ class MainWindow(QMainWindow):
         self.model = DatabaseTableModel(db, csv_sync, self)
         self.model.error_occurred.connect(self.show_error)
         self.model.synced.connect(self.show_status)
+        self.model.change_applied.connect(self.record_model_change)
 
         self.table_view = QTableView()
         self.table_view.setModel(self.model)
@@ -52,21 +74,82 @@ class MainWindow(QMainWindow):
         self.csv_preview.setReadOnly(True)
         self.csv_preview.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.csv_preview.setFont(QFont("Consolas", 10))
+        self.csv_highlighter = CsvSyntaxHighlighter(self.csv_preview.document())
+
+        self.csv_table = QTableWidget()
+        self.csv_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.csv_table.setAlternatingRowColors(True)
+
+        self.csv_mode = QComboBox()
+        self.csv_mode.addItems(["Raw Text", "CSV Table"])
+        self.csv_mode.currentTextChanged.connect(self.update_csv_mode)
+        self.csv_syntax_highlight = QCheckBox("CSV Syntax")
+        self.csv_syntax_highlight.setChecked(True)
+        self.csv_syntax_highlight.toggled.connect(self.apply_search_options)
+        self.csv_search_highlight = QCheckBox("Search Highlight")
+        self.csv_search_highlight.setChecked(True)
+        self.csv_search_highlight.toggled.connect(self.apply_search_options)
+
+        csv_controls = QHBoxLayout()
+        csv_controls.addWidget(self.csv_mode)
+        csv_controls.addWidget(self.csv_syntax_highlight)
+        csv_controls.addWidget(self.csv_search_highlight)
+        csv_controls.addStretch(1)
+
+        self.csv_stack = QTabWidget()
+        self.csv_stack.tabBar().hide()
+        self.csv_stack.addTab(self.csv_preview, "Raw Text")
+        self.csv_stack.addTab(self.csv_table, "CSV Table")
+
+        csv_widget = QWidget()
+        csv_layout = QVBoxLayout(csv_widget)
+        csv_layout.setContentsMargins(0, 0, 0, 0)
+        csv_layout.addLayout(csv_controls)
+        csv_layout.addWidget(self.csv_stack)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.table_view, "Table View")
-        self.tabs.addTab(self.csv_preview, "CSV View")
+        self.tabs.addTab(csv_widget, "CSV View")
         self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search...")
+        self.search_input.textChanged.connect(self.apply_search_options)
+        self.search_highlight = QCheckBox("Highlight")
+        self.search_highlight.setChecked(True)
+        self.search_highlight.toggled.connect(self.apply_search_options)
+        self.search_filter = QCheckBox("Filter")
+        self.search_filter.toggled.connect(self.apply_search_options)
+        self.search_case_sensitive = QCheckBox("Case Sensitive")
+        self.search_case_sensitive.toggled.connect(self.apply_search_options)
+        self.clear_search_action = QAction("Clear Search", self)
+        self.clear_search_action.triggered.connect(self.clear_search)
+
+        search_bar = QWidget()
+        search_layout = QHBoxLayout(search_bar)
+        search_layout.setContentsMargins(0, 0, 0, 0)
+        search_layout.addWidget(self.search_input)
+        search_layout.addWidget(self.search_highlight)
+        search_layout.addWidget(self.search_filter)
+        search_layout.addWidget(self.search_case_sensitive)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.table_list)
-        splitter.addWidget(self.tabs)
+        main_panel = QWidget()
+        main_layout = QVBoxLayout(main_panel)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(search_bar)
+        main_layout.addWidget(self.tabs)
+        splitter.addWidget(main_panel)
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
 
         self.setStatusBar(QStatusBar())
         self.create_toolbar()
+        self.create_log_panel()
+        self.configure_context_menus()
         self.refresh_tables()
+        self.refresh_change_log()
 
     def configure_draggable_headers(self) -> None:
         horizontal_header = self.table_view.horizontalHeader()
@@ -81,14 +164,67 @@ class MainWindow(QMainWindow):
         vertical_header.setFirstSectionMovable(True)
         vertical_header.sectionMoved.connect(self.on_row_section_moved)
 
+    def configure_context_menus(self) -> None:
+        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_view.customContextMenuRequested.connect(self.show_table_context_menu)
+        self.table_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_list.customContextMenuRequested.connect(self.show_table_list_context_menu)
+
+    def create_log_panel(self) -> None:
+        self.log_table = QTableWidget()
+        self.log_table.setColumnCount(7)
+        self.log_table.setHorizontalHeaderLabels(["ID", "Time", "Action", "Table", "Target", "Status", "Error"])
+        self.log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.log_table.setAlternatingRowColors(True)
+
+        dock = QDockWidget("Change Log", self)
+        dock.setWidget(self.log_table)
+        dock.setObjectName("change_log")
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+
+    def show_table_context_menu(self, position) -> None:
+        menu = QMenu(self)
+        menu.addAction(self.select_row_action)
+        menu.addAction(self.select_column_action)
+        menu.addAction(self.empty_cell_action)
+        menu.addSeparator()
+        menu.addAction(self.rename_row_action)
+        menu.addAction(self.delete_row_action)
+        menu.addSeparator()
+        menu.addAction(self.rename_column_action)
+        menu.addAction(self.delete_column_action)
+        menu.exec(self.table_view.viewport().mapToGlobal(position))
+
+    def show_table_list_context_menu(self, position) -> None:
+        menu = QMenu(self)
+        menu.addAction(self.create_table_action)
+        menu.addAction(self.rename_table_action)
+        menu.addAction(self.delete_table_action)
+        menu.exec(self.table_list.viewport().mapToGlobal(position))
+
     def create_toolbar(self) -> None:
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
+        self.new_db_action = QAction("New DB", self)
+        self.new_db_action.triggered.connect(self.new_database)
+        toolbar.addAction(self.new_db_action)
+
+        self.open_db_action = QAction("Open DB", self)
+        self.open_db_action.triggered.connect(self.open_database)
+        toolbar.addAction(self.open_db_action)
+
+        toolbar.addSeparator()
+
         self.create_table_action = QAction("Create Table", self)
         self.create_table_action.triggered.connect(self.create_table)
         toolbar.addAction(self.create_table_action)
+
+        self.rename_table_action = QAction("Rename Table", self)
+        self.rename_table_action.triggered.connect(self.rename_table)
+        toolbar.addAction(self.rename_table_action)
 
         self.delete_table_action = QAction("Delete Table", self)
         self.delete_table_action.triggered.connect(self.delete_table)
@@ -134,9 +270,88 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.select_row_action = QAction("Select Row", self)
+        self.select_row_action.triggered.connect(self.select_current_row)
+        toolbar.addAction(self.select_row_action)
+
+        self.select_column_action = QAction("Select Column", self)
+        self.select_column_action.triggered.connect(self.select_current_column)
+        toolbar.addAction(self.select_column_action)
+
+        self.select_all_action = QAction("Select All", self)
+        self.select_all_action.triggered.connect(self.table_view.selectAll)
+        toolbar.addAction(self.select_all_action)
+
+        self.clear_selection_action = QAction("Clear Selection", self)
+        self.clear_selection_action.triggered.connect(self.table_view.clearSelection)
+        toolbar.addAction(self.clear_selection_action)
+
+        toolbar.addSeparator()
+
+        self.undo_action = QAction("Undo Last", self)
+        self.undo_action.triggered.connect(self.undo_last)
+        toolbar.addAction(self.undo_action)
+
+        self.redo_action = QAction("Redo Last", self)
+        self.redo_action.triggered.connect(self.redo_last)
+        toolbar.addAction(self.redo_action)
+
+        toolbar.addSeparator()
+
         self.refresh_action = QAction("Refresh", self)
         self.refresh_action.triggered.connect(self.refresh_current)
         toolbar.addAction(self.refresh_action)
+
+        toolbar.addAction(self.clear_search_action)
+
+    def new_database(self) -> None:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "New SQLite Database",
+            str(Path.cwd() / "database.sqlite"),
+            "SQLite Database (*.sqlite *.db);;All Files (*)",
+        )
+        if not file_name:
+            return
+        self.switch_database(Path(file_name), "new_database")
+
+    def open_database(self) -> None:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open SQLite Database",
+            str(Path.cwd()),
+            "SQLite Database (*.sqlite *.db);;All Files (*)",
+        )
+        if not file_name:
+            return
+        self.switch_database(Path(file_name), "open_database")
+
+    def switch_database(self, db_path: Path, action: str) -> None:
+        old_db = self.db
+        session = open_session(db_path)
+        self.db = session.db
+        self.csv_sync = session.csv_sync
+        self.change_log.bind(self.db, self.csv_sync)
+        self.model.db = self.db
+        self.model.csv_sync = self.csv_sync
+        self.model.set_table(None)
+        self.csv_preview.clear()
+        self.csv_table.clear()
+        self.table_list.clear()
+        try:
+            old_db.close()
+        except Exception:
+            pass
+
+        self.change_log.log(
+            action,
+            target=str(db_path),
+            after={"db_path": str(db_path), "csv_dir": str(self.csv_sync.csv_dir)},
+            undoable=False,
+        )
+        self.refresh_tables()
+        self.refresh_change_log()
+        self.show_status(f"Using database {db_path}")
 
     def refresh_tables(self, select_name: str | None = None) -> None:
         current = select_name or self.current_table()
@@ -168,6 +383,7 @@ class MainWindow(QMainWindow):
             self.model.set_table(table_name)
             csv_path = self.csv_sync.export_table(self.db, table_name)
             self.reset_header_visual_order()
+            self.remember_current_order()
             self.update_csv_preview()
             self.table_view.resizeColumnsToContents()
             self.show_status(f"Loaded {table_name}. Synced to {csv_path}")
@@ -183,9 +399,44 @@ class MainWindow(QMainWindow):
 
         try:
             self.db.create_table(name)
-            self.csv_sync.export_table(self.db, name.strip())
-            self.refresh_tables(select_name=name.strip())
-            self.show_status(f"Created table {name.strip()}.")
+            table_name = name.strip()
+            self.csv_sync.export_table(self.db, table_name)
+            self.change_log.log("create_table", table_name, table_name, after={"table": table_name})
+            self.refresh_tables(select_name=table_name)
+            self.refresh_change_log()
+            self.show_status(f"Created table {table_name}.")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+
+    def rename_table(self) -> None:
+        table = self.require_current_table()
+        if table is None:
+            return
+
+        new_name, ok = QInputDialog.getText(self, "Rename Table", "New table name:", text=table)
+        if not ok:
+            return
+        new_name = new_name.strip()
+
+        try:
+            old_csv = self.csv_sync.path_for_table(table)
+            self.db.rename_table(table, new_name)
+            if old_csv.exists():
+                try:
+                    old_csv.rename(self.csv_sync.path_for_table(new_name))
+                except PermissionError:
+                    self.csv_sync.delete_table_csv(table)
+            csv_path = self.csv_sync.export_table(self.db, new_name)
+            self.change_log.log(
+                "rename_table",
+                new_name,
+                f"{table}->{new_name}",
+                before={"table": table},
+                after={"table": new_name},
+            )
+            self.refresh_tables(select_name=new_name)
+            self.refresh_change_log()
+            self.show_status(f"Renamed table to {new_name}. Synced to {csv_path}")
         except ValidationError as exc:
             self.show_error(str(exc))
 
@@ -206,11 +457,20 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            columns, rows = self.db.fetch_table_data(table)
             self.db.delete_table(table)
             self.csv_sync.delete_table_csv(table)
+            self.change_log.log(
+                "delete_table",
+                table,
+                table,
+                before={"table": table, "columns": columns, "rows": rows},
+                undoable=False,
+            )
             self.model.set_table(None)
             self.csv_preview.clear()
             self.refresh_tables()
+            self.refresh_change_log()
             self.show_status(f"Deleted table {table}.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -225,7 +485,16 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self.db.add_row(table, row_name.strip() or None)
+            row_id = self.db.add_row(table, row_name.strip() or None)
+            row = self.db.get_row(table, row_id)
+            position = len(self.db.fetch_rows(table)) - 1
+            self.change_log.log(
+                "add_row",
+                table,
+                str(row_id),
+                after={"row": row, "position": position},
+            )
+            self.refresh_change_log()
             self.sync_and_reload(table, "Added row.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -246,7 +515,16 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            old_name = str(row.get("_row_name") or "")
             self.db.rename_row(table, int(row["id"]), new_name)
+            self.change_log.log(
+                "rename_row",
+                table,
+                str(row["id"]),
+                before={"row_id": int(row["id"]), "row_name": old_name},
+                after={"row_id": int(row["id"]), "row_name": new_name.strip()},
+            )
+            self.refresh_change_log()
             self.sync_and_reload(table, "Renamed row.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -269,7 +547,21 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            current_order = [int(row["id"]) for row in self.db.fetch_rows(table)]
+            position_by_id = {row_id: index for index, row_id in enumerate(current_order)}
+            before_rows = [
+                {"data": dict(row), "position": position_by_id[int(row["id"])]}
+                for row in rows
+            ]
             self.db.delete_rows(table, row_ids)
+            self.change_log.log(
+                "delete_rows",
+                table,
+                ",".join(str(row_id) for row_id in row_ids),
+                before={"rows": before_rows, "row_order": current_order},
+                after={"row_ids": row_ids},
+            )
+            self.refresh_change_log()
             self.sync_and_reload(table, "Deleted row." if len(row_ids) == 1 else f"Deleted {len(row_ids)} rows.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -294,7 +586,19 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            before_cells = [
+                {"row_id": row_id, "column": column, "value": self.db.get_row(table, row_id).get(column)}
+                for row_id, column in cells
+            ]
             cleared = self.db.clear_cells(table, cells)
+            self.change_log.log(
+                "clear_cells",
+                table,
+                f"{cleared} cells",
+                before={"cells": before_cells},
+                after={"cells": [{"row_id": row_id, "column": column, "value": None} for row_id, column in cells]},
+            )
+            self.refresh_change_log()
             self.sync_and_reload(table, "Emptied cell." if cleared == 1 else f"Emptied {cleared} cells.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -310,6 +614,9 @@ class MainWindow(QMainWindow):
 
         try:
             self.db.add_column(table, column_name)
+            column = column_name.strip()
+            self.change_log.log("add_column", table, column, after={"column": column})
+            self.refresh_change_log()
             self.sync_and_reload(table, "Added column.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -343,6 +650,14 @@ class MainWindow(QMainWindow):
 
         try:
             self.db.rename_column(table, old_name, new_name)
+            self.change_log.log(
+                "rename_column",
+                table,
+                f"{old_name}->{new_name.strip()}",
+                before={"column": old_name},
+                after={"column": new_name.strip()},
+            )
+            self.refresh_change_log()
             self.sync_and_reload(table, "Renamed column.")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -393,7 +708,20 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            before_columns = [
+                {"name": column, "values": self.db.get_column_values(table, column)}
+                for column in columns_to_delete
+            ]
+            before_order = self.db.get_column_names(table)
             self.db.delete_columns(table, columns_to_delete)
+            self.change_log.log(
+                "delete_columns",
+                table,
+                ",".join(columns_to_delete),
+                before={"columns": before_columns, "column_order": before_order},
+                after={"columns": columns_to_delete},
+            )
+            self.refresh_change_log()
             self.sync_and_reload(
                 table,
                 "Deleted column." if len(columns_to_delete) == 1 else f"Deleted {len(columns_to_delete)} columns.",
@@ -431,10 +759,28 @@ class MainWindow(QMainWindow):
         try:
             self.db.create_ordered_copy(table, new_name)
             csv_path = self.csv_sync.export_table(self.db, new_name)
+            self.change_log.log(
+                "apply_order_copy",
+                new_name,
+                f"{table}->{new_name}",
+                before={"source_table": table},
+                after={"new_table": new_name},
+            )
             self.refresh_tables(select_name=new_name)
+            self.refresh_change_log()
             self.show_status(f"Created {new_name}. Synced to {csv_path}")
         except ValidationError as exc:
             self.show_error(str(exc))
+
+    def record_model_change(self, change: dict) -> None:
+        self.change_log.log(
+            change["action"],
+            change.get("table_name"),
+            change.get("target"),
+            before=change.get("before"),
+            after=change.get("after"),
+        )
+        self.refresh_change_log()
 
     def refresh_current(self) -> None:
         table = self.current_table()
@@ -446,6 +792,7 @@ class MainWindow(QMainWindow):
         csv_path = self.csv_sync.export_table(self.db, table)
         self.model.reload()
         self.reset_header_visual_order()
+        self.remember_current_order()
         self.update_csv_preview()
         self.table_view.resizeColumnsToContents()
         self.show_status(f"{message} Synced to {csv_path}")
@@ -458,13 +805,28 @@ class MainWindow(QMainWindow):
         if table is None:
             return
 
+        if self.model.filter_enabled:
+            self.show_error("Disable filtering before reordering columns.")
+            self.sync_and_reload(table, "Restored column order.")
+            return
+
         ordered_columns = self.visual_column_order()
         if len(ordered_columns) != len(self.model.columns):
             return
 
         try:
+            before_columns = list(self.last_column_order)
             self.db.reorder_columns(table, ordered_columns)
             csv_path = self.csv_sync.export_table(self.db, table)
+            self.change_log.log(
+                "reorder_columns",
+                table,
+                "columns",
+                before={"columns": before_columns},
+                after={"columns": ordered_columns},
+            )
+            self.last_column_order = list(ordered_columns)
+            self.refresh_change_log()
             self.update_csv_preview()
             self.show_status(f"Column order saved. Synced to {csv_path}")
         except ValidationError as exc:
@@ -479,13 +841,28 @@ class MainWindow(QMainWindow):
         if table is None:
             return
 
+        if self.model.filter_enabled:
+            self.show_error("Disable filtering before reordering rows.")
+            self.sync_and_reload(table, "Restored row order.")
+            return
+
         ordered_row_ids = self.visual_row_order()
         if len(ordered_row_ids) != len(self.model.rows):
             return
 
         try:
+            before_row_ids = list(self.last_row_order)
             self.db.reorder_rows(table, ordered_row_ids)
             csv_path = self.csv_sync.export_table(self.db, table)
+            self.change_log.log(
+                "reorder_rows",
+                table,
+                "rows",
+                before={"row_ids": before_row_ids},
+                after={"row_ids": ordered_row_ids},
+            )
+            self.last_row_order = list(ordered_row_ids)
+            self.refresh_change_log()
             self.update_csv_preview()
             self.show_status(f"Row order saved. Synced to {csv_path}")
         except ValidationError as exc:
@@ -510,6 +887,10 @@ class MainWindow(QMainWindow):
                 row_ids.append(int(row["id"]))
         return row_ids
 
+    def remember_current_order(self) -> None:
+        self.last_column_order = list(self.model.columns)
+        self.last_row_order = [int(row["id"]) for row in self.model.rows]
+
     def reset_header_visual_order(self) -> None:
         self._resetting_headers = True
         try:
@@ -523,15 +904,8 @@ class MainWindow(QMainWindow):
         finally:
             self._resetting_headers = False
 
-    def update_csv_preview(self) -> None:
-        table = self.current_table()
-        if table is None:
-            self.csv_preview.clear()
-            return
-        self.csv_preview.setPlainText(self.csv_sync.read_text(table))
-
-    def on_tab_changed(self, _: int) -> None:
-        if self.tabs.currentWidget() is self.csv_preview:
+    def on_tab_changed(self, index: int) -> None:
+        if index == 1:
             self.update_csv_preview()
 
     def current_table(self) -> str | None:
@@ -601,10 +975,123 @@ class MainWindow(QMainWindow):
 
         return sorted(cells)
 
+    def select_current_row(self) -> None:
+        index = self.table_view.currentIndex()
+        if index.isValid():
+            self.table_view.selectRow(index.row())
+
+    def select_current_column(self) -> None:
+        index = self.table_view.currentIndex()
+        if index.isValid():
+            self.table_view.selectColumn(index.column())
+
+    def clear_search(self) -> None:
+        self.search_input.clear()
+
+    def apply_search_options(self) -> None:
+        text = self.search_input.text()
+        self.model.set_search_options(
+            text,
+            self.search_highlight.isChecked(),
+            self.search_filter.isChecked(),
+            self.search_case_sensitive.isChecked(),
+        )
+        self.csv_highlighter.set_options(
+            syntax_enabled=self.csv_syntax_highlight.isChecked(),
+            search_enabled=self.csv_search_highlight.isChecked(),
+            search_text=text,
+            case_sensitive=self.search_case_sensitive.isChecked(),
+        )
+        self.populate_csv_table()
+
+    def update_csv_mode(self) -> None:
+        self.csv_stack.setCurrentIndex(0 if self.csv_mode.currentText() == "Raw Text" else 1)
+        self.update_csv_preview()
+
+    def update_csv_preview(self) -> None:
+        table = self.current_table()
+        if table is None:
+            self.csv_preview.clear()
+            self.csv_table.clear()
+            return
+        self.csv_preview.setPlainText(self.csv_sync.read_text(table))
+        self.populate_csv_table()
+
+    def populate_csv_table(self) -> None:
+        csv_text = self.csv_preview.toPlainText()
+        rows = list(csv.reader(StringIO(csv_text))) if csv_text else []
+        self.csv_table.clear()
+        if not rows:
+            self.csv_table.setRowCount(0)
+            self.csv_table.setColumnCount(0)
+            return
+
+        headers = rows[0]
+        data_rows = rows[1:]
+        self.csv_table.setColumnCount(len(headers))
+        self.csv_table.setRowCount(len(data_rows))
+        self.csv_table.setHorizontalHeaderLabels(headers)
+        for row_index, row in enumerate(data_rows):
+            for column_index, value in enumerate(row):
+                item = QTableWidgetItem(value)
+                if self.search_text_matches(value):
+                    item.setBackground(Qt.GlobalColor.yellow)
+                self.csv_table.setItem(row_index, column_index, item)
+
+    def search_text_matches(self, value: str) -> bool:
+        text = self.search_input.text()
+        if not text or not self.csv_search_highlight.isChecked():
+            return False
+        if self.search_case_sensitive.isChecked():
+            return text in value
+        return text.lower() in value.lower()
+
+    def refresh_change_log(self) -> None:
+        entries = self.change_log.entries()
+        self.log_table.setRowCount(len(entries))
+        for row_index, entry in enumerate(entries):
+            values = [
+                str(entry.id),
+                entry.timestamp,
+                entry.action,
+                entry.table_name or "",
+                entry.target or "",
+                entry.status,
+                entry.error_text or "",
+            ]
+            for column_index, value in enumerate(values):
+                self.log_table.setItem(row_index, column_index, QTableWidgetItem(value))
+        self.log_table.resizeColumnsToContents()
+
+    def undo_last(self) -> None:
+        ok, message, table = self.change_log.undo_last()
+        self.after_undo_redo(ok, message, table)
+
+    def redo_last(self) -> None:
+        ok, message, table = self.change_log.redo_last()
+        self.after_undo_redo(ok, message, table)
+
+    def after_undo_redo(self, ok: bool, message: str, table: str | None) -> None:
+        self.refresh_tables(select_name=table if table and self.db.table_exists(table) else None)
+        if table and self.db.table_exists(table):
+            self.model.set_table(table)
+            self.csv_sync.export_table(self.db, table)
+        else:
+            self.model.set_table(self.current_table())
+        self.reset_header_visual_order()
+        self.remember_current_order()
+        self.update_csv_preview()
+        self.refresh_change_log()
+        if ok:
+            self.show_status(message)
+        else:
+            self.show_error(message)
+
     def update_action_state(self) -> None:
         has_table = self.current_table() is not None
         for action in (
             self.delete_table_action,
+            self.rename_table_action,
             self.add_row_action,
             self.rename_row_action,
             self.delete_row_action,
@@ -628,7 +1115,15 @@ class MainWindow(QMainWindow):
         return f"{base_name}_{index}"
 
     def show_status(self, message: str) -> None:
-        self.statusBar().showMessage(message, 6000)
+        details = [f"DB: {self.db.db_path}"]
+        table = self.current_table()
+        if table:
+            details.append(f"Table: {table}")
+            details.append(f"Rows: {len(self.model.rows)}")
+            details.append(f"Columns: {len(self.model.columns)}")
+            details.append(f"CSV: {self.csv_sync.path_for_table(table)}")
+        details.append(message)
+        self.statusBar().showMessage(" | ".join(details), 8000)
 
     def show_error(self, message: str) -> None:
         self.statusBar().showMessage(message, 8000)

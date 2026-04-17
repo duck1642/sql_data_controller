@@ -217,6 +217,19 @@ class DatabaseControllerTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.db.fetch_rows("customers")
 
+    def test_rename_table_updates_metadata(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        row_id = self.db.add_row("customers", "first")
+        self.db.reorder_rows("customers", [row_id])
+        self.db.reorder_columns("customers", ["name", "id", "_row_name"])
+
+        self.db.rename_table("customers", "clients")
+
+        self.assertEqual(self.db.list_tables(), ["clients"])
+        self.assertEqual(self.db.get_column_names("clients"), ["name", "id", "_row_name"])
+        self.assertEqual(self.db.fetch_rows("clients")[0]["_row_name"], "first")
+
     def test_clear_cells_sets_multiple_user_cells_to_null(self) -> None:
         self.db.create_table("customers")
         self.db.add_column("customers", "name")

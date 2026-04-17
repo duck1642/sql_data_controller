@@ -16,18 +16,34 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The app creates runtime data under:
+On first launch, the app creates runtime data under:
 
 ```text
 data/database.sqlite
 data/csv/<table_name>.csv
 ```
 
+When you open or create another database, its CSV mirror is stored beside it:
+
+```text
+example.sqlite
+example_csv/<table_name>.csv
+```
+
 SQLite is the source of truth. CSV files are regenerated after successful table edits.
+
+## Features
+
+- Open or create SQLite database files.
+- Create, rename, rebuild, and delete tables.
+- Add, rename, delete, drag, and multi-select rows/columns.
+- Edit and empty selected cells.
+- Search with highlight or row filtering.
+- Switch CSV preview between raw highlighted text and read-only table mode.
+- View the persistent change log and use common undo/redo.
 
 ## Test
 
 ```powershell
 python -m unittest discover
 ```
-
