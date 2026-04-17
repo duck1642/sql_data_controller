@@ -47,6 +47,25 @@ class CsvSyncTests(unittest.TestCase):
         self.assertIn("full_name", text)
         self.assertNotIn(",name", text)
 
+    def test_export_follows_reordered_rows_and_columns(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        self.db.update_cell("customers", first_id, "name", "Ali")
+        self.db.update_cell("customers", second_id, "name", "Ayse")
+
+        self.db.reorder_rows("customers", [second_id, first_id])
+        self.db.reorder_columns("customers", ["name", "_row_name", "id"])
+
+        csv_path = self.csv_sync.export_table(self.db, "customers")
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+
+        self.assertEqual(rows[0], ["name", "_row_name", "id"])
+        self.assertEqual(rows[1], ["Ayse", "second", "2"])
+        self.assertEqual(rows[2], ["Ali", "first", "1"])
+
 
 if __name__ == "__main__":
     unittest.main()

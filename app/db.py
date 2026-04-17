@@ -15,6 +15,11 @@ from .validation import (
 )
 
 
+ROW_ORDER_TABLE = "_sdc_row_order"
+COLUMN_ORDER_TABLE = "_sdc_column_order"
+RESERVED_TABLE_PREFIX = "_sdc_"
+
+
 @dataclass(frozen=True)
 class ColumnInfo:
     name: str
@@ -32,6 +37,7 @@ class DatabaseController:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode = TRUNCATE")
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self._ensure_metadata_tables()
 
     def close(self) -> None:
         self.connection.close()
@@ -43,6 +49,7 @@ class DatabaseController:
             FROM sqlite_master
             WHERE type = 'table'
               AND name NOT LIKE 'sqlite_%'
+              AND name NOT GLOB '_sdc_*'
             ORDER BY name
             """
         ).fetchall()
@@ -58,6 +65,8 @@ class DatabaseController:
 
     def create_table(self, table_name: str) -> None:
         name = validate_identifier(table_name, "table name")
+        if name.startswith(RESERVED_TABLE_PREFIX):
+            raise ValidationError(f"Table names cannot start with {RESERVED_TABLE_PREFIX}.")
         if self.table_exists(name):
             raise ValidationError(f"Table '{name}' already exists.")
 
@@ -70,6 +79,7 @@ class DatabaseController:
             )
             """
         )
+        self._sync_column_order(name)
         self.connection.commit()
 
     def get_columns(self, table_name: str) -> list[ColumnInfo]:
@@ -88,12 +98,38 @@ class DatabaseController:
         ]
 
     def get_column_names(self, table_name: str) -> list[str]:
-        return [column.name for column in self.get_columns(table_name)]
+        columns = [column.name for column in self.get_columns(table_name)]
+        self._sync_column_order(table_name, columns)
+        rows = self.connection.execute(
+            f"""
+            SELECT column_name
+            FROM {COLUMN_ORDER_TABLE}
+            WHERE table_name = ?
+            ORDER BY position, column_name
+            """,
+            (table_name,),
+        ).fetchall()
+
+        column_set = set(columns)
+        ordered = [row["column_name"] for row in rows if row["column_name"] in column_set]
+        missing = [column for column in columns if column not in ordered]
+        return ordered + missing
 
     def fetch_rows(self, table_name: str) -> list[dict[str, Any]]:
         self._require_table(table_name)
+        self._sync_row_order(table_name)
         table_sql = quote_identifier(table_name)
-        rows = self.connection.execute(f"SELECT * FROM {table_sql} ORDER BY id").fetchall()
+        rows = self.connection.execute(
+            f"""
+            SELECT data.*
+            FROM {table_sql} AS data
+            LEFT JOIN {ROW_ORDER_TABLE} AS row_order
+              ON row_order.table_name = ?
+             AND row_order.row_id = data.id
+            ORDER BY COALESCE(row_order.position, data.id), data.id
+            """,
+            (table_name,),
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def fetch_table_data(self, table_name: str) -> tuple[list[str], list[dict[str, Any]]]:
@@ -109,6 +145,13 @@ class DatabaseController:
         cursor = self.connection.execute(
             f"INSERT INTO {table_sql} (_row_name) VALUES (?)",
             (name,),
+        )
+        self.connection.execute(
+            f"""
+            INSERT INTO {ROW_ORDER_TABLE} (table_name, row_id, position)
+            VALUES (?, ?, ?)
+            """,
+            (table_name, int(cursor.lastrowid), self._next_row_position(table_name)),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
@@ -138,6 +181,13 @@ class DatabaseController:
         table_sql = quote_identifier(table_name)
         column_sql = quote_identifier(name)
         self.connection.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} TEXT")
+        self.connection.execute(
+            f"""
+            INSERT OR REPLACE INTO {COLUMN_ORDER_TABLE} (table_name, column_name, position)
+            VALUES (?, ?, ?)
+            """,
+            (table_name, name, self._next_column_position(table_name)),
+        )
         self.connection.commit()
 
     def rename_column(self, table_name: str, old_name: str, new_name: str) -> None:
@@ -157,6 +207,15 @@ class DatabaseController:
         old_sql = quote_identifier(old_column)
         new_sql = quote_identifier(new_column)
         self.connection.execute(f"ALTER TABLE {table_sql} RENAME COLUMN {old_sql} TO {new_sql}")
+        self.connection.execute(
+            f"""
+            UPDATE {COLUMN_ORDER_TABLE}
+            SET column_name = ?
+            WHERE table_name = ?
+              AND column_name = ?
+            """,
+            (new_column, table_name, old_column),
+        )
         self.connection.commit()
 
     def update_cell(self, table_name: str, row_id: int, column_name: str, value: Any) -> None:
@@ -195,6 +254,40 @@ class DatabaseController:
             ).fetchone()
         return row is not None
 
+    def reorder_rows(self, table_name: str, row_ids: list[int]) -> None:
+        self._require_table(table_name)
+        current_ids = [int(row["id"]) for row in self.fetch_rows(table_name)]
+        proposed_ids = [int(row_id) for row_id in row_ids]
+        if sorted(current_ids) != sorted(proposed_ids):
+            raise ValidationError("Row order must include every current row exactly once.")
+
+        self.connection.executemany(
+            f"""
+            INSERT INTO {ROW_ORDER_TABLE} (table_name, row_id, position)
+            VALUES (?, ?, ?)
+            ON CONFLICT(table_name, row_id) DO UPDATE SET position = excluded.position
+            """,
+            [(table_name, row_id, index) for index, row_id in enumerate(proposed_ids)],
+        )
+        self.connection.commit()
+
+    def reorder_columns(self, table_name: str, column_names: list[str]) -> None:
+        self._require_table(table_name)
+        current_columns = self.get_column_names(table_name)
+        proposed_columns = [validate_identifier(column, "column name") for column in column_names]
+        if sorted(current_columns) != sorted(proposed_columns):
+            raise ValidationError("Column order must include every current column exactly once.")
+
+        self.connection.executemany(
+            f"""
+            INSERT INTO {COLUMN_ORDER_TABLE} (table_name, column_name, position)
+            VALUES (?, ?, ?)
+            ON CONFLICT(table_name, column_name) DO UPDATE SET position = excluded.position
+            """,
+            [(table_name, column, index) for index, column in enumerate(proposed_columns)],
+        )
+        self.connection.commit()
+
     def _require_table(self, table_name: str) -> None:
         name = validate_identifier(table_name, "table name")
         if not self.table_exists(name):
@@ -232,3 +325,130 @@ class DatabaseController:
         if text == "":
             return None
         return text
+
+    def _ensure_metadata_tables(self) -> None:
+        self.connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {ROW_ORDER_TABLE} (
+                table_name TEXT NOT NULL,
+                row_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (table_name, row_id)
+            )
+            """
+        )
+        self.connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {COLUMN_ORDER_TABLE} (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (table_name, column_name)
+            )
+            """
+        )
+        self.connection.commit()
+
+    def _sync_column_order(self, table_name: str, columns: list[str] | None = None) -> None:
+        column_names = columns if columns is not None else [column.name for column in self.get_columns(table_name)]
+        column_set = set(column_names)
+
+        existing_rows = self.connection.execute(
+            f"""
+            SELECT column_name, position
+            FROM {COLUMN_ORDER_TABLE}
+            WHERE table_name = ?
+            ORDER BY position
+            """,
+            (table_name,),
+        ).fetchall()
+        existing_positions = {
+            row["column_name"]: int(row["position"])
+            for row in existing_rows
+            if row["column_name"] in column_set
+        }
+
+        stale_columns = [row["column_name"] for row in existing_rows if row["column_name"] not in column_set]
+        self.connection.executemany(
+            f"DELETE FROM {COLUMN_ORDER_TABLE} WHERE table_name = ? AND column_name = ?",
+            [(table_name, column) for column in stale_columns],
+        )
+
+        next_position = max(existing_positions.values(), default=-1) + 1
+        inserts = []
+        for column in column_names:
+            if column not in existing_positions:
+                inserts.append((table_name, column, next_position))
+                next_position += 1
+
+        self.connection.executemany(
+            f"""
+            INSERT OR IGNORE INTO {COLUMN_ORDER_TABLE} (table_name, column_name, position)
+            VALUES (?, ?, ?)
+            """,
+            inserts,
+        )
+        self.connection.commit()
+
+    def _sync_row_order(self, table_name: str) -> None:
+        table_sql = quote_identifier(table_name)
+        row_ids = [
+            int(row["id"])
+            for row in self.connection.execute(f"SELECT id FROM {table_sql} ORDER BY id").fetchall()
+        ]
+        row_id_set = set(row_ids)
+
+        existing_rows = self.connection.execute(
+            f"""
+            SELECT row_id, position
+            FROM {ROW_ORDER_TABLE}
+            WHERE table_name = ?
+            ORDER BY position
+            """,
+            (table_name,),
+        ).fetchall()
+        existing_positions = {
+            int(row["row_id"]): int(row["position"])
+            for row in existing_rows
+            if int(row["row_id"]) in row_id_set
+        }
+
+        stale_ids = [int(row["row_id"]) for row in existing_rows if int(row["row_id"]) not in row_id_set]
+        self.connection.executemany(
+            f"DELETE FROM {ROW_ORDER_TABLE} WHERE table_name = ? AND row_id = ?",
+            [(table_name, row_id) for row_id in stale_ids],
+        )
+
+        next_position = max(existing_positions.values(), default=-1) + 1
+        inserts = []
+        for row_id in row_ids:
+            if row_id not in existing_positions:
+                inserts.append((table_name, row_id, next_position))
+                next_position += 1
+
+        self.connection.executemany(
+            f"""
+            INSERT OR IGNORE INTO {ROW_ORDER_TABLE} (table_name, row_id, position)
+            VALUES (?, ?, ?)
+            """,
+            inserts,
+        )
+        self.connection.commit()
+
+    def _next_row_position(self, table_name: str) -> int:
+        row = self.connection.execute(
+            f"SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM {ROW_ORDER_TABLE} WHERE table_name = ?",
+            (table_name,),
+        ).fetchone()
+        return int(row["next_position"])
+
+    def _next_column_position(self, table_name: str) -> int:
+        row = self.connection.execute(
+            f"""
+            SELECT COALESCE(MAX(position), -1) + 1 AS next_position
+            FROM {COLUMN_ORDER_TABLE}
+            WHERE table_name = ?
+            """,
+            (table_name,),
+        ).fetchone()
+        return int(row["next_position"])

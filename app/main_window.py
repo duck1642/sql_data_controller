@@ -27,6 +27,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.db = db
         self.csv_sync = csv_sync
+        self._resetting_headers = False
 
         self.setWindowTitle("SQL Data Controller")
         self.resize(1100, 700)
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.setAlternatingRowColors(True)
+        self.configure_draggable_headers()
 
         self.csv_preview = QPlainTextEdit()
         self.csv_preview.setReadOnly(True)
@@ -65,6 +67,17 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self.create_toolbar()
         self.refresh_tables()
+
+    def configure_draggable_headers(self) -> None:
+        horizontal_header = self.table_view.horizontalHeader()
+        horizontal_header.setSectionsMovable(True)
+        horizontal_header.setFirstSectionMovable(True)
+        horizontal_header.sectionMoved.connect(self.on_column_section_moved)
+
+        vertical_header = self.table_view.verticalHeader()
+        vertical_header.setSectionsMovable(True)
+        vertical_header.setFirstSectionMovable(True)
+        vertical_header.sectionMoved.connect(self.on_row_section_moved)
 
     def create_toolbar(self) -> None:
         toolbar = QToolBar("Main")
@@ -126,6 +139,7 @@ class MainWindow(QMainWindow):
         try:
             self.model.set_table(table_name)
             csv_path = self.csv_sync.export_table(self.db, table_name)
+            self.reset_header_visual_order()
             self.update_csv_preview()
             self.table_view.resizeColumnsToContents()
             self.show_status(f"Loaded {table_name}. Synced to {csv_path}")
@@ -240,9 +254,83 @@ class MainWindow(QMainWindow):
     def sync_and_reload(self, table: str, message: str) -> None:
         csv_path = self.csv_sync.export_table(self.db, table)
         self.model.reload()
+        self.reset_header_visual_order()
         self.update_csv_preview()
         self.table_view.resizeColumnsToContents()
         self.show_status(f"{message} Synced to {csv_path}")
+
+    def on_column_section_moved(self, _: int, __: int, ___: int) -> None:
+        if self._resetting_headers:
+            return
+
+        table = self.current_table()
+        if table is None:
+            return
+
+        ordered_columns = self.visual_column_order()
+        if len(ordered_columns) != len(self.model.columns):
+            return
+
+        try:
+            self.db.reorder_columns(table, ordered_columns)
+            csv_path = self.csv_sync.export_table(self.db, table)
+            self.update_csv_preview()
+            self.show_status(f"Column order saved. Synced to {csv_path}")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+            self.sync_and_reload(table, "Restored column order.")
+
+    def on_row_section_moved(self, _: int, __: int, ___: int) -> None:
+        if self._resetting_headers:
+            return
+
+        table = self.current_table()
+        if table is None:
+            return
+
+        ordered_row_ids = self.visual_row_order()
+        if len(ordered_row_ids) != len(self.model.rows):
+            return
+
+        try:
+            self.db.reorder_rows(table, ordered_row_ids)
+            csv_path = self.csv_sync.export_table(self.db, table)
+            self.update_csv_preview()
+            self.show_status(f"Row order saved. Synced to {csv_path}")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+            self.sync_and_reload(table, "Restored row order.")
+
+    def visual_column_order(self) -> list[str]:
+        header = self.table_view.horizontalHeader()
+        columns: list[str] = []
+        for visual_index in range(header.count()):
+            column_name = self.model.column_name(header.logicalIndex(visual_index))
+            if column_name is not None:
+                columns.append(column_name)
+        return columns
+
+    def visual_row_order(self) -> list[int]:
+        header = self.table_view.verticalHeader()
+        row_ids: list[int] = []
+        for visual_index in range(header.count()):
+            row = self.model.row_record(header.logicalIndex(visual_index))
+            if row is not None:
+                row_ids.append(int(row["id"]))
+        return row_ids
+
+    def reset_header_visual_order(self) -> None:
+        self._resetting_headers = True
+        try:
+            for header in (self.table_view.horizontalHeader(), self.table_view.verticalHeader()):
+                header.blockSignals(True)
+                for logical_index in range(header.count()):
+                    visual_index = header.visualIndex(logical_index)
+                    if visual_index != logical_index:
+                        header.moveSection(visual_index, logical_index)
+                header.blockSignals(False)
+        finally:
+            self._resetting_headers = False
 
     def update_csv_preview(self) -> None:
         table = self.current_table()
@@ -291,4 +379,3 @@ class MainWindow(QMainWindow):
     def show_error(self, message: str) -> None:
         self.statusBar().showMessage(message, 8000)
         QMessageBox.warning(self, "SQL Data Controller", message)
-

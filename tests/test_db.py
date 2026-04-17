@@ -67,6 +67,43 @@ class DatabaseControllerTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.db.rename_column("customers", "name", "email")
 
+    def test_internal_metadata_tables_are_hidden(self) -> None:
+        self.db.create_table("customers")
+
+        self.assertEqual(self.db.list_tables(), ["customers"])
+
+    def test_row_order_can_be_reordered(self) -> None:
+        self.db.create_table("customers")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        third_id = self.db.add_row("customers", "third")
+
+        self.db.reorder_rows("customers", [third_id, first_id, second_id])
+
+        self.assertEqual(
+            [row["_row_name"] for row in self.db.fetch_rows("customers")],
+            ["third", "first", "second"],
+        )
+
+    def test_column_order_can_be_reordered(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "first_name")
+        self.db.add_column("customers", "email")
+
+        self.db.reorder_columns("customers", ["id", "email", "_row_name", "first_name"])
+
+        self.assertEqual(self.db.get_column_names("customers"), ["id", "email", "_row_name", "first_name"])
+
+    def test_reorder_requires_complete_permutation(self) -> None:
+        self.db.create_table("customers")
+        row_id = self.db.add_row("customers", "first")
+        self.db.add_column("customers", "name")
+
+        with self.assertRaises(ValidationError):
+            self.db.reorder_rows("customers", [row_id, row_id])
+        with self.assertRaises(ValidationError):
+            self.db.reorder_columns("customers", ["id", "_row_name"])
+
 
 if __name__ == "__main__":
     unittest.main()
