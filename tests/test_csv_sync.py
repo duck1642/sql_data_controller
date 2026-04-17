@@ -66,6 +66,21 @@ class CsvSyncTests(unittest.TestCase):
         self.assertEqual(rows[1], ["Ayse", "second", "2"])
         self.assertEqual(rows[2], ["Ali", "first", "1"])
 
+    def test_export_ordered_copy(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        row_id = self.db.add_row("customers", "first")
+        self.db.update_cell("customers", row_id, "name", "Ali")
+        self.db.reorder_columns("customers", ["name", "_row_name", "id"])
+        self.db.create_ordered_copy("customers", "customers_rebuilt")
+
+        csv_path = self.csv_sync.export_table(self.db, "customers_rebuilt")
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+
+        self.assertEqual(rows[0], ["name", "_row_name", "id"])
+        self.assertEqual(rows[1], ["Ali", "first", "1"])
+
 
 if __name__ == "__main__":
     unittest.main()

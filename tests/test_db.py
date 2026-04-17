@@ -104,6 +104,43 @@ class DatabaseControllerTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.db.reorder_columns("customers", ["id", "_row_name"])
 
+    def test_create_ordered_copy_preserves_original_and_applies_order_to_new_table(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        self.db.update_cell("customers", first_id, "name", "Ali")
+        self.db.update_cell("customers", second_id, "name", "Ayse")
+        self.db.reorder_rows("customers", [second_id, first_id])
+        self.db.reorder_columns("customers", ["name", "_row_name", "id"])
+
+        self.db.create_ordered_copy("customers", "customers_rebuilt")
+
+        self.assertEqual(self.db.list_tables(), ["customers", "customers_rebuilt"])
+        self.assertEqual(
+            [column.name for column in self.db.get_columns("customers")],
+            ["id", "_row_name", "name"],
+        )
+        self.assertEqual(
+            [column.name for column in self.db.get_columns("customers_rebuilt")],
+            ["name", "_row_name", "id"],
+        )
+        self.assertEqual(
+            [row["_row_name"] for row in self.db.fetch_rows("customers_rebuilt")],
+            ["second", "first"],
+        )
+        self.assertEqual(self.db.fetch_rows("customers_rebuilt")[0]["name"], "Ayse")
+
+    def test_create_ordered_copy_rejects_bad_names(self) -> None:
+        self.db.create_table("customers")
+
+        with self.assertRaises(ValidationError):
+            self.db.create_ordered_copy("customers", "customers")
+        with self.assertRaises(ValidationError):
+            self.db.create_ordered_copy("customers", "_sdc_rebuilt")
+        with self.assertRaises(ValidationError):
+            self.db.create_ordered_copy("customers", "bad name")
+
 
 if __name__ == "__main__":
     unittest.main()

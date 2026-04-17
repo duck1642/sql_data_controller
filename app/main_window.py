@@ -104,6 +104,10 @@ class MainWindow(QMainWindow):
         self.rename_column_action.triggered.connect(self.rename_column)
         toolbar.addAction(self.rename_column_action)
 
+        self.apply_order_action = QAction("Apply Order to New Table", self)
+        self.apply_order_action.triggered.connect(self.apply_order_to_new_table)
+        toolbar.addAction(self.apply_order_action)
+
         toolbar.addSeparator()
 
         self.refresh_action = QAction("Refresh", self)
@@ -245,6 +249,41 @@ class MainWindow(QMainWindow):
         except ValidationError as exc:
             self.show_error(str(exc))
 
+    def apply_order_to_new_table(self) -> None:
+        table = self.require_current_table()
+        if table is None:
+            return
+
+        default_name = self.default_rebuilt_table_name(table)
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Apply Order to New Table",
+            "New table name:",
+            text=default_name,
+        )
+        if not ok:
+            return
+
+        new_name = new_name.strip()
+        confirm = QMessageBox.question(
+            self,
+            "Apply Order to New Table",
+            (
+                f"Create '{new_name}' from '{table}' using the current row and column order?\n\n"
+                "The original table will not be changed."
+            ),
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.db.create_ordered_copy(table, new_name)
+            csv_path = self.csv_sync.export_table(self.db, new_name)
+            self.refresh_tables(select_name=new_name)
+            self.show_status(f"Created {new_name}. Synced to {csv_path}")
+        except ValidationError as exc:
+            self.show_error(str(exc))
+
     def refresh_current(self) -> None:
         table = self.current_table()
         self.refresh_tables(select_name=table)
@@ -370,8 +409,20 @@ class MainWindow(QMainWindow):
             self.rename_row_action,
             self.add_column_action,
             self.rename_column_action,
+            self.apply_order_action,
         ):
             action.setEnabled(has_table)
+
+    def default_rebuilt_table_name(self, table: str) -> str:
+        base_name = f"{table}_rebuilt"
+        existing = set(self.db.list_tables())
+        if base_name not in existing:
+            return base_name
+
+        index = 2
+        while f"{base_name}_{index}" in existing:
+            index += 1
+        return f"{base_name}_{index}"
 
     def show_status(self, message: str) -> None:
         self.statusBar().showMessage(message, 6000)

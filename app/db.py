@@ -64,9 +64,7 @@ class DatabaseController:
         return row is not None
 
     def create_table(self, table_name: str) -> None:
-        name = validate_identifier(table_name, "table name")
-        if name.startswith(RESERVED_TABLE_PREFIX):
-            raise ValidationError(f"Table names cannot start with {RESERVED_TABLE_PREFIX}.")
+        name = self._validate_new_table_name(table_name)
         if self.table_exists(name):
             raise ValidationError(f"Table '{name}' already exists.")
 
@@ -81,6 +79,54 @@ class DatabaseController:
         )
         self._sync_column_order(name)
         self.connection.commit()
+
+    def create_ordered_copy(self, source_table: str, new_table: str) -> None:
+        self._require_table(source_table)
+        source_name = validate_identifier(source_table, "source table name")
+        new_name = self._validate_new_table_name(new_table)
+        if self.table_exists(new_name):
+            raise ValidationError(f"Table '{new_name}' already exists.")
+
+        columns, rows = self.fetch_table_data(source_name)
+        new_table_sql = quote_identifier(new_name)
+        column_definitions = ",\n                ".join(self._column_definition(column) for column in columns)
+        insert_columns_sql = ", ".join(quote_identifier(column) for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+
+        try:
+            self.connection.execute("BEGIN")
+            self.connection.execute(
+                f"""
+                CREATE TABLE {new_table_sql} (
+                    {column_definitions}
+                )
+                """
+            )
+
+            if rows:
+                self.connection.executemany(
+                    f"INSERT INTO {new_table_sql} ({insert_columns_sql}) VALUES ({placeholders})",
+                    [tuple(row[column] for column in columns) for row in rows],
+                )
+
+            self.connection.executemany(
+                f"""
+                INSERT INTO {COLUMN_ORDER_TABLE} (table_name, column_name, position)
+                VALUES (?, ?, ?)
+                """,
+                [(new_name, column, index) for index, column in enumerate(columns)],
+            )
+            self.connection.executemany(
+                f"""
+                INSERT INTO {ROW_ORDER_TABLE} (table_name, row_id, position)
+                VALUES (?, ?, ?)
+                """,
+                [(new_name, int(row["id"]), index) for index, row in enumerate(rows)],
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def get_columns(self, table_name: str) -> list[ColumnInfo]:
         self._require_table(table_name)
@@ -292,6 +338,21 @@ class DatabaseController:
         name = validate_identifier(table_name, "table name")
         if not self.table_exists(name):
             raise ValidationError(f"Table '{name}' does not exist.")
+
+    def _validate_new_table_name(self, table_name: str) -> str:
+        name = validate_identifier(table_name, "table name")
+        if name.startswith(RESERVED_TABLE_PREFIX):
+            raise ValidationError(f"Table names cannot start with {RESERVED_TABLE_PREFIX}.")
+        return name
+
+    def _column_definition(self, column_name: str) -> str:
+        column_sql = quote_identifier(column_name)
+        if column_name == "id":
+            return f"{column_sql} INTEGER PRIMARY KEY AUTOINCREMENT"
+        if column_name == "_row_name":
+            return f"{column_sql} TEXT UNIQUE"
+        validate_user_column_name(column_name)
+        return f"{column_sql} TEXT"
 
     def _require_row(self, table_name: str, row_id: int) -> dict[str, Any]:
         if int(row_id) <= 0:
