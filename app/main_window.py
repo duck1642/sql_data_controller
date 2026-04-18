@@ -20,13 +20,14 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTabWidget,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
-    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -132,17 +133,25 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.search_highlight)
         search_layout.addWidget(self.search_filter)
         search_layout.addWidget(self.search_case_sensitive)
+        search_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        search_bar.setFixedHeight(search_bar.sizeHint().height())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.table_list)
         main_panel = QWidget()
         main_layout = QVBoxLayout(main_panel)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(search_bar)
-        main_layout.addWidget(self.tabs)
+        main_layout.addWidget(search_bar, 0)
+        main_layout.addWidget(self.tabs, 1)
         splitter.addWidget(main_panel)
         splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+
+        root = QWidget()
+        self.root_layout = QVBoxLayout(root)
+        self.root_layout.setContentsMargins(0, 0, 0, 0)
+        self.root_layout.setSpacing(0)
+        self.root_layout.addWidget(splitter, 1)
+        self.setCentralWidget(root)
 
         self.setStatusBar(QStatusBar())
         self.create_toolbar()
@@ -204,105 +213,140 @@ class MainWindow(QMainWindow):
         menu.exec(self.table_list.viewport().mapToGlobal(position))
 
     def create_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
         self.new_db_action = QAction("New DB", self)
         self.new_db_action.triggered.connect(self.new_database)
-        toolbar.addAction(self.new_db_action)
 
         self.open_db_action = QAction("Open DB", self)
         self.open_db_action.triggered.connect(self.open_database)
-        toolbar.addAction(self.open_db_action)
-
-        toolbar.addSeparator()
 
         self.create_table_action = QAction("Create Table", self)
         self.create_table_action.triggered.connect(self.create_table)
-        toolbar.addAction(self.create_table_action)
 
         self.rename_table_action = QAction("Rename Table", self)
         self.rename_table_action.triggered.connect(self.rename_table)
-        toolbar.addAction(self.rename_table_action)
 
         self.delete_table_action = QAction("Delete Table", self)
         self.delete_table_action.triggered.connect(self.delete_table)
-        toolbar.addAction(self.delete_table_action)
-
-        toolbar.addSeparator()
 
         self.add_row_action = QAction("Add Row", self)
         self.add_row_action.triggered.connect(self.add_row)
-        toolbar.addAction(self.add_row_action)
 
         self.rename_row_action = QAction("Rename Row", self)
         self.rename_row_action.triggered.connect(self.rename_row)
-        toolbar.addAction(self.rename_row_action)
 
         self.delete_row_action = QAction("Delete Row", self)
         self.delete_row_action.triggered.connect(self.delete_row)
-        toolbar.addAction(self.delete_row_action)
 
         self.empty_cell_action = QAction("Empty Cell", self)
         self.empty_cell_action.triggered.connect(self.empty_cells)
-        toolbar.addAction(self.empty_cell_action)
-
-        toolbar.addSeparator()
 
         self.add_column_action = QAction("Add Column", self)
         self.add_column_action.triggered.connect(self.add_column)
-        toolbar.addAction(self.add_column_action)
 
         self.rename_column_action = QAction("Rename Column", self)
         self.rename_column_action.triggered.connect(self.rename_column)
-        toolbar.addAction(self.rename_column_action)
 
         self.delete_column_action = QAction("Delete Column", self)
         self.delete_column_action.triggered.connect(self.delete_column)
-        toolbar.addAction(self.delete_column_action)
-
-        toolbar.addSeparator()
 
         self.apply_order_action = QAction("Apply Order to New Table", self)
         self.apply_order_action.triggered.connect(self.apply_order_to_new_table)
-        toolbar.addAction(self.apply_order_action)
-
-        toolbar.addSeparator()
 
         self.select_row_action = QAction("Select Row", self)
         self.select_row_action.triggered.connect(self.select_current_row)
-        toolbar.addAction(self.select_row_action)
 
         self.select_column_action = QAction("Select Column", self)
         self.select_column_action.triggered.connect(self.select_current_column)
-        toolbar.addAction(self.select_column_action)
 
         self.select_all_action = QAction("Select All", self)
         self.select_all_action.triggered.connect(self.table_view.selectAll)
-        toolbar.addAction(self.select_all_action)
 
         self.clear_selection_action = QAction("Clear Selection", self)
         self.clear_selection_action.triggered.connect(self.table_view.clearSelection)
-        toolbar.addAction(self.clear_selection_action)
-
-        toolbar.addSeparator()
 
         self.undo_action = QAction("Undo Last", self)
         self.undo_action.triggered.connect(self.undo_last)
-        toolbar.addAction(self.undo_action)
 
         self.redo_action = QAction("Redo Last", self)
         self.redo_action.triggered.connect(self.redo_last)
-        toolbar.addAction(self.redo_action)
-
-        toolbar.addSeparator()
 
         self.refresh_action = QAction("Refresh", self)
         self.refresh_action.triggered.connect(self.refresh_current)
-        toolbar.addAction(self.refresh_action)
 
-        toolbar.addAction(self.clear_search_action)
+        self.create_menus()
+        self.create_quick_action_bar()
+
+    def create_menus(self) -> None:
+        menu_bar = self.menuBar()
+        menu_bar.clear()
+
+        file_menu = menu_bar.addMenu("File")
+        file_menu.addAction(self.new_db_action)
+        file_menu.addAction(self.open_db_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.refresh_action)
+
+        table_menu = menu_bar.addMenu("Table")
+        table_menu.addAction(self.create_table_action)
+        table_menu.addAction(self.rename_table_action)
+        table_menu.addAction(self.delete_table_action)
+        table_menu.addSeparator()
+        table_menu.addAction(self.apply_order_action)
+
+        row_menu = menu_bar.addMenu("Row")
+        row_menu.addAction(self.add_row_action)
+        row_menu.addAction(self.rename_row_action)
+        row_menu.addAction(self.delete_row_action)
+        row_menu.addSeparator()
+        row_menu.addAction(self.empty_cell_action)
+
+        column_menu = menu_bar.addMenu("Column")
+        column_menu.addAction(self.add_column_action)
+        column_menu.addAction(self.rename_column_action)
+        column_menu.addAction(self.delete_column_action)
+
+        selection_menu = menu_bar.addMenu("Selection")
+        selection_menu.addAction(self.select_row_action)
+        selection_menu.addAction(self.select_column_action)
+        selection_menu.addAction(self.select_all_action)
+        selection_menu.addSeparator()
+        selection_menu.addAction(self.clear_selection_action)
+
+        edit_menu = menu_bar.addMenu("Edit")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.clear_search_action)
+
+    def create_quick_action_bar(self) -> None:
+        action_bar = QWidget()
+        action_bar.setObjectName("quick_action_bar")
+        layout = QHBoxLayout(action_bar)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        quick_actions = [
+            self.new_db_action,
+            self.open_db_action,
+            self.create_table_action,
+            self.add_row_action,
+            self.add_column_action,
+            self.empty_cell_action,
+            self.undo_action,
+            self.redo_action,
+            self.refresh_action,
+        ]
+        for action in quick_actions:
+            button = QToolButton()
+            button.setDefaultAction(action)
+            button.setAutoRaise(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            layout.addWidget(button)
+        layout.addStretch(1)
+        action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        action_bar.setFixedHeight(action_bar.sizeHint().height())
+        self.root_layout.insertWidget(0, action_bar)
 
     def new_database(self) -> None:
         file_name, _ = QFileDialog.getSaveFileName(

@@ -9,6 +9,7 @@ from app.db import DatabaseController
 
 def main() -> int:
     try:
+        from PyQt6.QtCore import Qt
         from PyQt6.QtWidgets import QApplication
     except ModuleNotFoundError:
         print("PyQt6 is not installed. Run: pip install -r requirements.txt", file=sys.stderr)
@@ -23,6 +24,16 @@ def main() -> int:
     csv_sync = CsvSync(data_dir / "csv")
 
     app = QApplication(sys.argv)
+    for effect in (
+        Qt.UIEffect.UI_AnimateMenu,
+        Qt.UIEffect.UI_FadeMenu,
+        Qt.UIEffect.UI_AnimateTooltip,
+        Qt.UIEffect.UI_FadeTooltip,
+        Qt.UIEffect.UI_AnimateCombo,
+        Qt.UIEffect.UI_AnimateToolBox,
+    ):
+        app.setEffectEnabled(effect, False)
+
     window = MainWindow(db, csv_sync)
     window.show()
 
@@ -33,4 +44,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

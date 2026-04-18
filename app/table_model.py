@@ -10,6 +10,10 @@ from .db import DatabaseController
 from .validation import ValidationError
 
 
+SEARCH_MATCH_BACKGROUND = QColor("#f0c84b")
+SEARCH_MATCH_FOREGROUND = QColor("#111111")
+
+
 class DatabaseTableModel(QAbstractTableModel):
     error_occurred = pyqtSignal(str)
     synced = pyqtSignal(str)
@@ -73,8 +77,11 @@ class DatabaseTableModel(QAbstractTableModel):
 
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             return text
-        if role == Qt.ItemDataRole.BackgroundRole and self._cell_matches_search(text):
-            return QBrush(QColor("#fff2a8"))
+        if self._cell_matches_search(text):
+            if role == Qt.ItemDataRole.BackgroundRole:
+                return QBrush(SEARCH_MATCH_BACKGROUND)
+            if role == Qt.ItemDataRole.ForegroundRole:
+                return QBrush(SEARCH_MATCH_FOREGROUND)
         return None
 
     def headerData(
@@ -129,7 +136,12 @@ class DatabaseTableModel(QAbstractTableModel):
             self.dataChanged.emit(
                 index,
                 index,
-                [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole, Qt.ItemDataRole.BackgroundRole],
+                [
+                    Qt.ItemDataRole.DisplayRole,
+                    Qt.ItemDataRole.EditRole,
+                    Qt.ItemDataRole.BackgroundRole,
+                    Qt.ItemDataRole.ForegroundRole,
+                ],
             )
         self.change_applied.emit(
             {

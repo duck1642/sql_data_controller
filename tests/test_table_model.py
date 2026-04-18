@@ -5,7 +5,7 @@ import unittest
 import uuid
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex
+from PyQt6.QtCore import QModelIndex, Qt
 
 from app.csv_sync import CsvSync
 from app.db import DatabaseController
@@ -40,7 +40,19 @@ class TableModelTests(unittest.TestCase):
         self.assertEqual(self.model.rowCount(QModelIndex()), 1)
         self.assertEqual(self.model.rows[0]["name"], "Ali")
 
+    def test_search_highlight_uses_readable_foreground(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        row_id = self.db.add_row("customers", "first")
+        self.db.update_cell("customers", row_id, "name", "Ali")
+        self.model.set_table("customers")
+
+        self.model.set_search_options("ali", True, False, False)
+        index = self.model.index(0, self.model.columns.index("name"))
+
+        self.assertIsNotNone(self.model.data(index, Qt.ItemDataRole.BackgroundRole))
+        self.assertIsNotNone(self.model.data(index, Qt.ItemDataRole.ForegroundRole))
+
 
 if __name__ == "__main__":
     unittest.main()
-
