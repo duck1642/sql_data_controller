@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import csv
+import time
 from pathlib import Path
 from io import StringIO
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QAction, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
@@ -32,6 +34,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .app_logger import AppLogger
 from .change_log import ChangeLogService
 from .csv_sync import CsvSync
 from .csv_highlighter import CsvSyntaxHighlighter
@@ -52,12 +55,15 @@ from .validation import PROTECTED_COLUMNS, ValidationError
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, db: DatabaseController, csv_sync: CsvSync):
+    def __init__(self, db: DatabaseController, csv_sync: CsvSync, app_logger: AppLogger | None = None):
         super().__init__()
         self.db = db
         self.csv_sync = csv_sync
+        self.app_logger = app_logger or AppLogger(db.db_path.parent / "logs")
         self.change_log = ChangeLogService(db, csv_sync)
         self._resetting_headers = False
+        self._search_log_blocked = False
+        self._action_error_seen = False
         self.last_row_order: list[int] = []
         self.last_column_order: list[str] = []
 
@@ -134,7 +140,7 @@ class MainWindow(QMainWindow):
         self.search_case_sensitive = QCheckBox("Case Sensitive")
         self.search_case_sensitive.toggled.connect(self.apply_search_options)
         self.clear_search_action = QAction("Clear Search", self)
-        self.clear_search_action.triggered.connect(self.clear_search)
+        self.clear_search_action.triggered.connect(self.wrap_user_action("clear_search", self.clear_search, "ui"))
 
         search_bar = QWidget()
         search_layout = QHBoxLayout(search_bar)
@@ -169,6 +175,7 @@ class MainWindow(QMainWindow):
         self.configure_context_menus()
         self.refresh_tables()
         self.refresh_change_log()
+        self.app_logger.info("app", "main_window", "success", "Main window initialized.", **self.log_context())
 
     def configure_draggable_headers(self) -> None:
         horizontal_header = self.table_view.horizontalHeader()
@@ -224,88 +231,97 @@ class MainWindow(QMainWindow):
 
     def create_toolbar(self) -> None:
         self.new_db_action = QAction("New DB", self)
-        self.new_db_action.triggered.connect(self.new_database)
+        self.new_db_action.triggered.connect(self.wrap_user_action("new_database", self.new_database, "db"))
 
         self.open_db_action = QAction("Open DB", self)
-        self.open_db_action.triggered.connect(self.open_database)
+        self.open_db_action.triggered.connect(self.wrap_user_action("open_database", self.open_database, "db"))
 
         self.create_table_action = QAction("Create Table", self)
-        self.create_table_action.triggered.connect(self.create_table)
+        self.create_table_action.triggered.connect(self.wrap_user_action("create_table", self.create_table))
 
         self.rename_table_action = QAction("Rename Table", self)
-        self.rename_table_action.triggered.connect(self.rename_table)
+        self.rename_table_action.triggered.connect(self.wrap_user_action("rename_table", self.rename_table))
 
         self.delete_table_action = QAction("Delete Table", self)
-        self.delete_table_action.triggered.connect(self.delete_table)
+        self.delete_table_action.triggered.connect(self.wrap_user_action("delete_table", self.delete_table))
 
         self.add_row_action = QAction("Add Row", self)
-        self.add_row_action.triggered.connect(self.add_row)
+        self.add_row_action.triggered.connect(self.wrap_user_action("add_row", self.add_row))
 
         self.rename_row_action = QAction("Rename Row", self)
-        self.rename_row_action.triggered.connect(self.rename_row)
+        self.rename_row_action.triggered.connect(self.wrap_user_action("rename_row", self.rename_row))
 
         self.delete_row_action = QAction("Delete Row", self)
-        self.delete_row_action.triggered.connect(self.delete_row)
+        self.delete_row_action.triggered.connect(self.wrap_user_action("delete_row", self.delete_row))
 
         self.empty_cell_action = QAction("Empty Cell", self)
-        self.empty_cell_action.triggered.connect(self.empty_cells)
+        self.empty_cell_action.triggered.connect(self.wrap_user_action("empty_cells", self.empty_cells))
 
         self.add_column_action = QAction("Add Column", self)
-        self.add_column_action.triggered.connect(self.add_column)
+        self.add_column_action.triggered.connect(self.wrap_user_action("add_column", self.add_column))
 
         self.rename_column_action = QAction("Rename Column", self)
-        self.rename_column_action.triggered.connect(self.rename_column)
+        self.rename_column_action.triggered.connect(self.wrap_user_action("rename_column", self.rename_column))
 
         self.delete_column_action = QAction("Delete Column", self)
-        self.delete_column_action.triggered.connect(self.delete_column)
+        self.delete_column_action.triggered.connect(self.wrap_user_action("delete_column", self.delete_column))
 
         self.apply_order_action = QAction("Apply Order to New Table", self)
-        self.apply_order_action.triggered.connect(self.apply_order_to_new_table)
+        self.apply_order_action.triggered.connect(self.wrap_user_action("apply_order_to_new_table", self.apply_order_to_new_table))
 
         self.select_row_action = QAction("Select Row", self)
-        self.select_row_action.triggered.connect(self.select_current_row)
+        self.select_row_action.triggered.connect(self.wrap_user_action("select_row", self.select_current_row, "ui"))
 
         self.select_column_action = QAction("Select Column", self)
-        self.select_column_action.triggered.connect(self.select_current_column)
+        self.select_column_action.triggered.connect(self.wrap_user_action("select_column", self.select_current_column, "ui"))
 
         self.select_all_action = QAction("Select All", self)
-        self.select_all_action.triggered.connect(self.table_view.selectAll)
+        self.select_all_action.triggered.connect(self.wrap_user_action("select_all", self.table_view.selectAll, "ui"))
 
         self.clear_selection_action = QAction("Clear Selection", self)
-        self.clear_selection_action.triggered.connect(self.table_view.clearSelection)
+        self.clear_selection_action.triggered.connect(self.wrap_user_action("clear_selection", self.table_view.clearSelection, "ui"))
 
         self.undo_action = QAction("Undo Last", self)
-        self.undo_action.triggered.connect(self.undo_last)
+        self.undo_action.triggered.connect(self.wrap_user_action("undo_last", self.undo_last))
 
         self.redo_action = QAction("Redo Last", self)
-        self.redo_action.triggered.connect(self.redo_last)
+        self.redo_action.triggered.connect(self.wrap_user_action("redo_last", self.redo_last))
 
         self.refresh_action = QAction("Refresh", self)
-        self.refresh_action.triggered.connect(self.refresh_current)
+        self.refresh_action.triggered.connect(self.wrap_user_action("refresh", self.refresh_current, "ui"))
 
         self.export_current_csv_action = QAction("Current Table as CSV", self)
-        self.export_current_csv_action.triggered.connect(self.export_current_table_csv)
+        self.export_current_csv_action.triggered.connect(self.wrap_user_action("export_current_csv", self.export_current_table_csv, "export"))
 
         self.export_current_tsv_action = QAction("Current Table as TSV", self)
-        self.export_current_tsv_action.triggered.connect(self.export_current_table_tsv)
+        self.export_current_tsv_action.triggered.connect(self.wrap_user_action("export_current_tsv", self.export_current_table_tsv, "export"))
 
         self.export_current_json_action = QAction("Current Table as JSON", self)
-        self.export_current_json_action.triggered.connect(self.export_current_table_json)
+        self.export_current_json_action.triggered.connect(self.wrap_user_action("export_current_json", self.export_current_table_json, "export"))
 
         self.export_current_xlsx_action = QAction("Current Table as XLSX", self)
-        self.export_current_xlsx_action.triggered.connect(self.export_current_table_xlsx)
+        self.export_current_xlsx_action.triggered.connect(self.wrap_user_action("export_current_xlsx", self.export_current_table_xlsx, "export"))
 
         self.export_current_sql_action = QAction("Current Table as SQL", self)
-        self.export_current_sql_action.triggered.connect(self.export_current_table_sql)
+        self.export_current_sql_action.triggered.connect(self.wrap_user_action("export_current_sql", self.export_current_table_sql, "export"))
 
         self.export_all_xlsx_action = QAction("All Tables as XLSX", self)
-        self.export_all_xlsx_action.triggered.connect(self.export_all_tables_xlsx)
+        self.export_all_xlsx_action.triggered.connect(self.wrap_user_action("export_all_xlsx", self.export_all_tables_xlsx, "export"))
 
         self.export_all_sql_action = QAction("All Tables as SQL", self)
-        self.export_all_sql_action.triggered.connect(self.export_all_tables_sql)
+        self.export_all_sql_action.triggered.connect(self.wrap_user_action("export_all_sql", self.export_all_tables_sql, "export"))
 
         self.backup_sqlite_action = QAction("Database Backup as SQLite", self)
-        self.backup_sqlite_action.triggered.connect(self.backup_database_sqlite)
+        self.backup_sqlite_action.triggered.connect(self.wrap_user_action("backup_sqlite", self.backup_database_sqlite, "export"))
+
+        self.open_log_folder_action = QAction("Open Log Folder", self)
+        self.open_log_folder_action.triggered.connect(self.wrap_user_action("open_log_folder", self.open_log_folder, "ui"))
+
+        self.open_current_log_action = QAction("Open Current Log", self)
+        self.open_current_log_action.triggered.connect(self.wrap_user_action("open_current_log", self.open_current_log, "ui"))
+
+        self.copy_last_error_action = QAction("Copy Last Error", self)
+        self.copy_last_error_action.triggered.connect(self.wrap_user_action("copy_last_error", self.copy_last_error, "ui"))
 
         self.create_menus()
         self.create_quick_action_bar()
@@ -364,6 +380,12 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.clear_search_action)
 
+        help_menu = menu_bar.addMenu("Help")
+        diagnostics_menu = help_menu.addMenu("Diagnostics")
+        diagnostics_menu.addAction(self.open_log_folder_action)
+        diagnostics_menu.addAction(self.open_current_log_action)
+        diagnostics_menu.addAction(self.copy_last_error_action)
+
     def create_quick_action_bar(self) -> None:
         action_bar = QWidget()
         action_bar.setObjectName("quick_action_bar")
@@ -393,6 +415,60 @@ class MainWindow(QMainWindow):
         action_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         action_bar.setFixedHeight(action_bar.sizeHint().height())
         self.root_layout.insertWidget(0, action_bar)
+
+    def wrap_user_action(self, action_name: str, callback, event: str = "user_action"):
+        def wrapped(*_args) -> None:
+            self.run_user_action(action_name, callback, event)
+
+        return wrapped
+
+    def run_user_action(self, action_name: str, callback, event: str = "user_action") -> None:
+        start = time.perf_counter()
+        self._action_error_seen = False
+        self.app_logger.info(event, action_name, "started", **self.log_context())
+        try:
+            callback()
+        except Exception as exc:
+            self._action_error_seen = True
+            self.app_logger.exception(
+                event,
+                action_name,
+                exc,
+                message="User action failed.",
+                duration_ms=self.elapsed_ms(start),
+                **self.log_context(),
+            )
+            self.show_error(f"{action_name.replace('_', ' ').capitalize()} failed: {exc}")
+            return
+
+        status = "completed_with_warning" if self._action_error_seen else "success"
+        level = "WARNING" if self._action_error_seen else "INFO"
+        self.app_logger.log(
+            level,
+            event,
+            action_name,
+            status,
+            duration_ms=self.elapsed_ms(start),
+            **self.log_context(),
+        )
+
+    def elapsed_ms(self, start: float) -> int:
+        return int((time.perf_counter() - start) * 1000)
+
+    def log_context(self, **extra) -> dict:
+        context = {
+            "db": str(self.db.db_path),
+            "table": self.current_table(),
+        }
+        try:
+            selection = self.table_view.selectionModel()
+            if selection is not None:
+                context["selected_rows"] = len({index.row() for index in selection.selectedRows()})
+                context["selected_columns"] = len({index.column() for index in selection.selectedColumns()})
+        except Exception:
+            pass
+        context.update(extra)
+        return context
 
     def new_database(self) -> None:
         file_name, _ = QFileDialog.getSaveFileName(
@@ -441,8 +517,22 @@ class MainWindow(QMainWindow):
             return
         try:
             exported_path = exporter(self.db, table, output_path)
+            self.app_logger.info(
+                "export",
+                f"export_current_{label.lower()}",
+                "success",
+                export_path=str(exported_path),
+                **self.log_context(),
+            )
             self.show_status(f"Exported {table} as {label} to {exported_path}")
         except Exception as exc:
+            self.app_logger.exception(
+                "export",
+                f"export_current_{label.lower()}",
+                exc,
+                export_path=str(output_path),
+                **self.log_context(),
+            )
             self.show_error(f"Export failed: {exc}")
 
     def export_all_tables_xlsx(self) -> None:
@@ -452,8 +542,10 @@ class MainWindow(QMainWindow):
             return
         try:
             exported_path = export_all_xlsx(self.db, output_path)
+            self.app_logger.info("export", "export_all_xlsx", "success", export_path=str(exported_path), **self.log_context())
             self.show_status(f"Exported all tables as XLSX to {exported_path}")
         except Exception as exc:
+            self.app_logger.exception("export", "export_all_xlsx", exc, export_path=str(output_path), **self.log_context())
             self.show_error(f"Export failed: {exc}")
 
     def export_all_tables_sql(self) -> None:
@@ -463,8 +555,10 @@ class MainWindow(QMainWindow):
             return
         try:
             exported_path = export_all_sql(self.db, output_path)
+            self.app_logger.info("export", "export_all_sql", "success", export_path=str(exported_path), **self.log_context())
             self.show_status(f"Exported all tables as SQL to {exported_path}")
         except Exception as exc:
+            self.app_logger.exception("export", "export_all_sql", exc, export_path=str(output_path), **self.log_context())
             self.show_error(f"Export failed: {exc}")
 
     def backup_database_sqlite(self) -> None:
@@ -477,8 +571,10 @@ class MainWindow(QMainWindow):
                 self.show_error("Choose a backup path different from the open database.")
                 return
             exported_path = backup_sqlite_database(self.db, output_path)
+            self.app_logger.info("export", "backup_sqlite", "success", export_path=str(exported_path), **self.log_context())
             self.show_status(f"Backed up database to {exported_path}")
         except Exception as exc:
+            self.app_logger.exception("export", "backup_sqlite", exc, export_path=str(output_path), **self.log_context())
             self.show_error(f"Backup failed: {exc}")
 
     def choose_export_path(self, default_name: str, file_filter: str) -> Path | None:
@@ -489,6 +585,24 @@ class MainWindow(QMainWindow):
             file_filter,
         )
         return Path(file_name) if file_name else None
+
+    def open_log_folder(self) -> None:
+        self.app_logger.log_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.app_logger.log_dir.resolve())))
+
+    def open_current_log(self) -> None:
+        current_log = self.app_logger.current_log_path()
+        current_log.parent.mkdir(parents=True, exist_ok=True)
+        current_log.touch(exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(current_log.resolve())))
+
+    def copy_last_error(self) -> None:
+        last_error = self.app_logger.last_error_line()
+        if not last_error:
+            self.show_status("No error log entry found.")
+            return
+        QApplication.clipboard().setText(last_error)
+        self.show_status("Copied last error log entry.")
 
     def switch_database(self, db_path: Path, action: str) -> None:
         old_db = self.db
@@ -512,6 +626,13 @@ class MainWindow(QMainWindow):
             target=str(db_path),
             after={"db_path": str(db_path), "csv_dir": str(self.csv_sync.csv_dir)},
             undoable=False,
+        )
+        self.app_logger.info(
+            "db",
+            action,
+            "success",
+            db=str(db_path),
+            csv_path=str(self.csv_sync.csv_dir),
         )
         self.refresh_tables()
         self.refresh_change_log()
@@ -541,6 +662,7 @@ class MainWindow(QMainWindow):
             self.model.set_table(None)
             self.csv_preview.clear()
             self.update_action_state()
+            self.app_logger.info("ui", "select_table", "cleared", **self.log_context())
             return
 
         try:
@@ -550,6 +672,15 @@ class MainWindow(QMainWindow):
             self.remember_current_order()
             self.update_csv_preview()
             self.table_view.resizeColumnsToContents()
+            self.app_logger.info(
+                "ui",
+                "select_table",
+                "success",
+                csv_path=str(csv_path),
+                row_count=len(self.model.rows),
+                column_count=len(self.model.columns),
+                **self.log_context(table=table_name),
+            )
             self.show_status(f"Loaded {table_name}. Synced to {csv_path}")
         except ValidationError as exc:
             self.show_error(str(exc))
@@ -937,6 +1068,16 @@ class MainWindow(QMainWindow):
             self.show_error(str(exc))
 
     def record_model_change(self, change: dict) -> None:
+        self.app_logger.info(
+            "user_action",
+            change["action"],
+            "success",
+            target=change.get("target"),
+            table=change.get("table_name"),
+            row_id=(change.get("after") or change.get("before") or {}).get("row_id"),
+            column=(change.get("after") or change.get("before") or {}).get("column"),
+            db=str(self.db.db_path),
+        )
         self.change_log.log(
             change["action"],
             change.get("table_name"),
@@ -1069,6 +1210,13 @@ class MainWindow(QMainWindow):
             self._resetting_headers = False
 
     def on_tab_changed(self, index: int) -> None:
+        self.app_logger.info(
+            "ui",
+            "tab_changed",
+            "success",
+            tab=self.tabs.tabText(index) if 0 <= index < self.tabs.count() else str(index),
+            **self.log_context(),
+        )
         if index == 1:
             self.update_csv_preview()
 
@@ -1167,9 +1315,23 @@ class MainWindow(QMainWindow):
             case_sensitive=self.search_case_sensitive.isChecked(),
         )
         self.populate_csv_table()
+        if not self._search_log_blocked:
+            self.app_logger.info(
+                "ui",
+                "search_options",
+                "success",
+                search_length=len(text),
+                highlight=self.search_highlight.isChecked(),
+                filter=self.search_filter.isChecked(),
+                case_sensitive=self.search_case_sensitive.isChecked(),
+                csv_syntax=self.csv_syntax_highlight.isChecked(),
+                csv_search_highlight=self.csv_search_highlight.isChecked(),
+                **self.log_context(),
+            )
 
     def update_csv_mode(self) -> None:
         self.csv_stack.setCurrentIndex(0 if self.csv_mode.currentText() == "Raw Text" else 1)
+        self.app_logger.info("ui", "csv_mode_changed", "success", mode=self.csv_mode.currentText(), **self.log_context())
         self.update_csv_preview()
 
     def update_csv_preview(self) -> None:
@@ -1295,5 +1457,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(" | ".join(details), 8000)
 
     def show_error(self, message: str) -> None:
+        self._action_error_seen = True
+        self.app_logger.warning("ui", "show_error", "reported", message, **self.log_context())
         self.statusBar().showMessage(message, 8000)
         QMessageBox.warning(self, "SQL Data Controller", message)
