@@ -36,6 +36,16 @@ from .change_log import ChangeLogService
 from .csv_sync import CsvSync
 from .csv_highlighter import CsvSyntaxHighlighter
 from .db import DatabaseController
+from .exporters import (
+    backup_sqlite_database,
+    export_all_sql,
+    export_all_xlsx,
+    export_table_csv,
+    export_table_json,
+    export_table_sql,
+    export_table_tsv,
+    export_table_xlsx,
+)
 from .session import open_session
 from .table_model import DatabaseTableModel
 from .validation import PROTECTED_COLUMNS, ValidationError
@@ -273,6 +283,30 @@ class MainWindow(QMainWindow):
         self.refresh_action = QAction("Refresh", self)
         self.refresh_action.triggered.connect(self.refresh_current)
 
+        self.export_current_csv_action = QAction("Current Table as CSV", self)
+        self.export_current_csv_action.triggered.connect(self.export_current_table_csv)
+
+        self.export_current_tsv_action = QAction("Current Table as TSV", self)
+        self.export_current_tsv_action.triggered.connect(self.export_current_table_tsv)
+
+        self.export_current_json_action = QAction("Current Table as JSON", self)
+        self.export_current_json_action.triggered.connect(self.export_current_table_json)
+
+        self.export_current_xlsx_action = QAction("Current Table as XLSX", self)
+        self.export_current_xlsx_action.triggered.connect(self.export_current_table_xlsx)
+
+        self.export_current_sql_action = QAction("Current Table as SQL", self)
+        self.export_current_sql_action.triggered.connect(self.export_current_table_sql)
+
+        self.export_all_xlsx_action = QAction("All Tables as XLSX", self)
+        self.export_all_xlsx_action.triggered.connect(self.export_all_tables_xlsx)
+
+        self.export_all_sql_action = QAction("All Tables as SQL", self)
+        self.export_all_sql_action.triggered.connect(self.export_all_tables_sql)
+
+        self.backup_sqlite_action = QAction("Database Backup as SQLite", self)
+        self.backup_sqlite_action.triggered.connect(self.backup_database_sqlite)
+
         self.create_menus()
         self.create_quick_action_bar()
 
@@ -285,6 +319,18 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.open_db_action)
         file_menu.addSeparator()
         file_menu.addAction(self.refresh_action)
+
+        export_menu = menu_bar.addMenu("Export")
+        export_menu.addAction(self.export_current_csv_action)
+        export_menu.addAction(self.export_current_tsv_action)
+        export_menu.addAction(self.export_current_json_action)
+        export_menu.addAction(self.export_current_xlsx_action)
+        export_menu.addAction(self.export_current_sql_action)
+        export_menu.addSeparator()
+        export_menu.addAction(self.export_all_xlsx_action)
+        export_menu.addAction(self.export_all_sql_action)
+        export_menu.addSeparator()
+        export_menu.addAction(self.backup_sqlite_action)
 
         table_menu = menu_bar.addMenu("Table")
         table_menu.addAction(self.create_table_action)
@@ -369,6 +415,80 @@ class MainWindow(QMainWindow):
         if not file_name:
             return
         self.switch_database(Path(file_name), "open_database")
+
+    def export_current_table_csv(self) -> None:
+        self.export_current_table("CSV", ".csv", "CSV Files (*.csv);;All Files (*)", export_table_csv)
+
+    def export_current_table_tsv(self) -> None:
+        self.export_current_table("TSV", ".tsv", "TSV Files (*.tsv);;All Files (*)", export_table_tsv)
+
+    def export_current_table_json(self) -> None:
+        self.export_current_table("JSON", ".json", "JSON Files (*.json);;All Files (*)", export_table_json)
+
+    def export_current_table_xlsx(self) -> None:
+        self.export_current_table("XLSX", ".xlsx", "Excel Files (*.xlsx);;All Files (*)", export_table_xlsx)
+
+    def export_current_table_sql(self) -> None:
+        self.export_current_table("SQL", ".sql", "SQL Files (*.sql);;All Files (*)", export_table_sql)
+
+    def export_current_table(self, label: str, suffix: str, file_filter: str, exporter) -> None:
+        table = self.current_table()
+        if table is None:
+            self.show_error("Select a table before exporting.")
+            return
+        output_path = self.choose_export_path(f"{table}{suffix}", file_filter)
+        if output_path is None:
+            return
+        try:
+            exported_path = exporter(self.db, table, output_path)
+            self.show_status(f"Exported {table} as {label} to {exported_path}")
+        except Exception as exc:
+            self.show_error(f"Export failed: {exc}")
+
+    def export_all_tables_xlsx(self) -> None:
+        default_name = f"{self.db.db_path.stem}_all.xlsx"
+        output_path = self.choose_export_path(default_name, "Excel Files (*.xlsx);;All Files (*)")
+        if output_path is None:
+            return
+        try:
+            exported_path = export_all_xlsx(self.db, output_path)
+            self.show_status(f"Exported all tables as XLSX to {exported_path}")
+        except Exception as exc:
+            self.show_error(f"Export failed: {exc}")
+
+    def export_all_tables_sql(self) -> None:
+        default_name = f"{self.db.db_path.stem}_ordered.sql"
+        output_path = self.choose_export_path(default_name, "SQL Files (*.sql);;All Files (*)")
+        if output_path is None:
+            return
+        try:
+            exported_path = export_all_sql(self.db, output_path)
+            self.show_status(f"Exported all tables as SQL to {exported_path}")
+        except Exception as exc:
+            self.show_error(f"Export failed: {exc}")
+
+    def backup_database_sqlite(self) -> None:
+        default_name = f"{self.db.db_path.stem}_backup.sqlite"
+        output_path = self.choose_export_path(default_name, "SQLite Database (*.sqlite *.db);;All Files (*)")
+        if output_path is None:
+            return
+        try:
+            if output_path.resolve() == self.db.db_path.resolve():
+                self.show_error("Choose a backup path different from the open database.")
+                return
+            exported_path = backup_sqlite_database(self.db, output_path)
+            self.show_status(f"Backed up database to {exported_path}")
+        except Exception as exc:
+            self.show_error(f"Backup failed: {exc}")
+
+    def choose_export_path(self, default_name: str, file_filter: str) -> Path | None:
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export",
+            str(self.db.db_path.parent / default_name),
+            file_filter,
+        )
+        return Path(file_name) if file_name else None
 
     def switch_database(self, db_path: Path, action: str) -> None:
         old_db = self.db
@@ -1144,6 +1264,11 @@ class MainWindow(QMainWindow):
             self.rename_column_action,
             self.delete_column_action,
             self.apply_order_action,
+            self.export_current_csv_action,
+            self.export_current_tsv_action,
+            self.export_current_json_action,
+            self.export_current_xlsx_action,
+            self.export_current_sql_action,
         ):
             action.setEnabled(has_table)
 
