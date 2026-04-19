@@ -8,3 +8,4 @@ logs/*
 !logs/.gitkeep
 .test_tmp/
 test_runtime*/
+docs/
