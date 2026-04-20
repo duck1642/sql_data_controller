@@ -85,6 +85,10 @@ class MainWindow(QMainWindow):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table_view.setAlternatingRowColors(True)
+        self.table_view.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table_view.horizontalScrollBar().setSingleStep(12)
+        self.table_view.verticalScrollBar().setSingleStep(12)
         self.configure_draggable_headers()
 
         self.csv_preview = QPlainTextEdit()
@@ -96,6 +100,10 @@ class MainWindow(QMainWindow):
         self.csv_table = QTableWidget()
         self.csv_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.csv_table.setAlternatingRowColors(True)
+        self.csv_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.csv_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.csv_table.horizontalScrollBar().setSingleStep(12)
+        self.csv_table.verticalScrollBar().setSingleStep(12)
 
         self.csv_mode = QComboBox()
         self.csv_mode.addItems(["Raw Text", "CSV Table"])

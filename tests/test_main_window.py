@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QMessageBox
 
 from app.app_logger import AppLogger
 from app.csv_sync import CsvSync
@@ -61,6 +61,18 @@ class MainWindowTests(unittest.TestCase):
     def test_table_list_sidebar_can_narrow_without_collapsing(self) -> None:
         self.assertEqual(self.window.table_list.minimumWidth(), 70)
         self.assertFalse(self.window.main_splitter.isCollapsible(0))
+
+    def test_table_scrollbars_use_pixel_scrolling(self) -> None:
+        self.assertEqual(
+            self.window.table_view.horizontalScrollMode(),
+            QAbstractItemView.ScrollMode.ScrollPerPixel,
+        )
+        self.assertEqual(self.window.table_view.horizontalScrollBar().singleStep(), 12)
+        self.assertEqual(
+            self.window.csv_table.horizontalScrollMode(),
+            QAbstractItemView.ScrollMode.ScrollPerPixel,
+        )
+        self.assertEqual(self.window.csv_table.horizontalScrollBar().singleStep(), 12)
 
     def test_action_wrapper_logs_started_and_success(self) -> None:
         self.window.run_user_action("test_action", lambda: None)
