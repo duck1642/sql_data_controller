@@ -5,8 +5,9 @@ import unittest
 import uuid
 import json
 from pathlib import Path
+from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from app.app_logger import AppLogger
 from app.csv_sync import CsvSync
@@ -77,6 +78,23 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(failure["level"], "ERROR")
         self.assertEqual(failure["status"], "failed")
         self.assertEqual(failure["error_type"], "RuntimeError")
+
+    def test_delete_table_creates_trash_snapshot_before_real_delete(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        row_id = self.db.add_row("customers", "first")
+        self.db.update_cell("customers", row_id, "name", "Ali")
+        self.window.refresh_tables(select_name="customers")
+
+        with patch("app.main_window.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            self.window.delete_table()
+
+        self.assertEqual(self.db.list_tables(), [])
+        snapshots = list((self.temp_dir / "trash" / "tables").glob("customers_*"))
+        self.assertEqual(len(snapshots), 1)
+        self.assertTrue((snapshots[0] / "table.sqlite").exists())
+        self.assertTrue((snapshots[0] / "table.csv").exists())
+        self.assertTrue((snapshots[0] / "manifest.json").exists())
 
     def read_log_records(self) -> list[dict]:
         records: list[dict] = []

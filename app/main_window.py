@@ -51,6 +51,7 @@ from .exporters import (
 )
 from .session import open_session
 from .table_model import DatabaseTableModel
+from .trash import create_table_trash_snapshot
 from .validation import PROTECTED_COLUMNS, ValidationError
 
 
@@ -744,8 +745,8 @@ class MainWindow(QMainWindow):
             self,
             "Delete Table",
             (
-                f"Delete table '{table}' and its CSV mirror?\n\n"
-                "This cannot be undone from inside the app."
+                f"Create a trash snapshot for '{table}', then delete it from the active database?\n\n"
+                "The snapshot can be restored manually later from the trash folder."
             ),
         )
         if confirm != QMessageBox.StandardButton.Yes:
@@ -753,20 +754,36 @@ class MainWindow(QMainWindow):
 
         try:
             columns, rows = self.db.fetch_table_data(table)
+            snapshot = create_table_trash_snapshot(self.db, self.csv_sync, table)
             self.db.delete_table(table)
             self.csv_sync.delete_table_csv(table)
             self.change_log.log(
                 "delete_table",
                 table,
                 table,
-                before={"table": table, "columns": columns, "rows": rows},
+                before={
+                    "table": table,
+                    "columns": columns,
+                    "rows": rows,
+                    "trash_snapshot": str(snapshot.snapshot_dir),
+                },
                 undoable=False,
+            )
+            self.app_logger.info(
+                "db",
+                "delete_table_snapshot",
+                "success",
+                table=table,
+                trash_snapshot=str(snapshot.snapshot_dir),
+                sqlite_snapshot=str(snapshot.sqlite_path),
+                csv_snapshot=str(snapshot.csv_path),
+                db=str(self.db.db_path),
             )
             self.model.set_table(None)
             self.csv_preview.clear()
             self.refresh_tables()
             self.refresh_change_log()
-            self.show_status(f"Deleted table {table}.")
+            self.show_status(f"Deleted table {table}. Trash snapshot: {snapshot.snapshot_dir}")
         except ValidationError as exc:
             self.show_error(str(exc))
 

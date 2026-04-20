@@ -6,6 +6,8 @@ venv/
 data/
 logs/*
 !logs/.gitkeep
+trash/*
+!trash/.gitkeep
 .test_tmp/
 test_runtime*/
 docs/
