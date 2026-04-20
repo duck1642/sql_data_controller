@@ -58,6 +58,10 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(diagnostics_menu.title(), "Diagnostics")
         self.assertEqual(diagnostic_actions, ["Open Log Folder", "Open Current Log", "Copy Last Error"])
 
+    def test_table_list_sidebar_can_narrow_without_collapsing(self) -> None:
+        self.assertEqual(self.window.table_list.minimumWidth(), 70)
+        self.assertFalse(self.window.main_splitter.isCollapsible(0))
+
     def test_action_wrapper_logs_started_and_success(self) -> None:
         self.window.run_user_action("test_action", lambda: None)
 
