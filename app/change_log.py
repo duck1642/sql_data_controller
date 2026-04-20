@@ -92,8 +92,11 @@ class ChangeLogService:
 
         entry = self._entry_from_row(row)
         if not entry.undoable:
-            self._mark(entry.id, "failed", "Undo is not available for this change.")
-            return False, f"Undo is not available for {entry.action}.", entry.table_name
+            # Non-undoable actions, such as table delete with a trash snapshot,
+            # remain applied. Marking them failed would make the history imply
+            # the original delete failed, and skipping past them could undo
+            # older changes against data that no longer exists.
+            return False, self._barrier_message("Undo", entry), entry.table_name
 
         try:
             table_to_sync = self._apply_undo(entry)
@@ -110,7 +113,7 @@ class ChangeLogService:
             SELECT *
             FROM {CHANGE_LOG_TABLE}
             WHERE status = 'undone'
-            ORDER BY id DESC
+            ORDER BY id ASC
             LIMIT 1
             """
         ).fetchone()
@@ -118,6 +121,10 @@ class ChangeLogService:
             return False, "No undone change to redo.", None
 
         entry = self._entry_from_row(row)
+        blocker = self._latest_applied_after(entry.id)
+        if blocker is not None:
+            return False, self._redo_blocker_message(blocker), blocker.table_name
+
         try:
             table_to_sync = self._apply_redo(entry)
             self._mark(entry.id, "applied", None)
@@ -249,6 +256,32 @@ class ChangeLogService:
             (status, error_text, entry_id),
         )
         self.db.connection.commit()
+
+    def _latest_applied_after(self, entry_id: int) -> ChangeLogEntry | None:
+        row = self.db.connection.execute(
+            f"""
+            SELECT *
+            FROM {CHANGE_LOG_TABLE}
+            WHERE status = 'applied'
+              AND id > ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (entry_id,),
+        ).fetchone()
+        return self._entry_from_row(row) if row is not None else None
+
+    def _barrier_message(self, operation: str, entry: ChangeLogEntry) -> str:
+        if entry.action == "delete_table":
+            return f"{operation} is blocked because table '{entry.table_name}' was deleted."
+        if entry.action in {"delete_database", "new_database", "open_database"}:
+            return f"{operation} is blocked because the database session changed."
+        return f"{operation} is blocked by non-undoable action {entry.action}."
+
+    def _redo_blocker_message(self, entry: ChangeLogEntry) -> str:
+        if not entry.undoable:
+            return self._barrier_message("Redo", entry)
+        return f"Redo is blocked because a newer action '{entry.action}' was applied."
 
     def _entry_from_row(self, row: Any) -> ChangeLogEntry:
         return ChangeLogEntry(

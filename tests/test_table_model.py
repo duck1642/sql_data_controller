@@ -53,6 +53,23 @@ class TableModelTests(unittest.TestCase):
         self.assertIsNotNone(self.model.data(index, Qt.ItemDataRole.BackgroundRole))
         self.assertIsNotNone(self.model.data(index, Qt.ItemDataRole.ForegroundRole))
 
+    def test_filter_does_not_force_highlighting_when_highlight_is_disabled(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        first_id = self.db.add_row("customers", "first")
+        second_id = self.db.add_row("customers", "second")
+        self.db.update_cell("customers", first_id, "name", "Ali")
+        self.db.update_cell("customers", second_id, "name", "Ayse")
+        self.model.set_table("customers")
+
+        self.model.set_search_options("ali", False, True, False)
+        index = self.model.index(0, self.model.columns.index("name"))
+
+        self.assertEqual(self.model.rowCount(QModelIndex()), 1)
+        self.assertEqual(self.model.rows[0]["name"], "Ali")
+        self.assertIsNone(self.model.data(index, Qt.ItemDataRole.BackgroundRole))
+        self.assertIsNone(self.model.data(index, Qt.ItemDataRole.ForegroundRole))
+
 
 if __name__ == "__main__":
     unittest.main()

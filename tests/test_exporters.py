@@ -6,7 +6,9 @@ import shutil
 import sqlite3
 import unittest
 import uuid
+from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
@@ -116,7 +118,7 @@ class ExporterTests(unittest.TestCase):
         sql_path = export_table_sql(self.db, "customers", self.temp_dir / "customers.sql")
         text = sql_path.read_text(encoding="utf-8")
 
-        with sqlite3.connect(":memory:") as connection:
+        with closing(sqlite3.connect(":memory:")) as connection:
             connection.executescript(text)
             count = connection.execute('SELECT COUNT(*) FROM "customers"').fetchone()[0]
 
@@ -127,7 +129,7 @@ class ExporterTests(unittest.TestCase):
 
         backup_path = backup_sqlite_database(self.db, self.temp_dir / "backup.sqlite")
 
-        with sqlite3.connect(backup_path) as connection:
+        with closing(sqlite3.connect(backup_path)) as connection:
             table_names = {
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -135,6 +137,17 @@ class ExporterTests(unittest.TestCase):
 
         self.assertIn("customers", table_names)
         self.assertIn("_sdc_row_order", table_names)
+
+    def test_sqlite_backup_preserves_existing_file_when_replace_fails(self) -> None:
+        self.create_ordered_customer_table()
+        backup_path = self.temp_dir / "backup.sqlite"
+        backup_path.write_text("previous backup", encoding="utf-8")
+
+        with patch("pathlib.Path.replace", side_effect=OSError("replace failed")):
+            with self.assertRaises(OSError):
+                backup_sqlite_database(self.db, backup_path)
+
+        self.assertEqual(backup_path.read_text(encoding="utf-8"), "previous backup")
 
 
 if __name__ == "__main__":

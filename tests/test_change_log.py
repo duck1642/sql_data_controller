@@ -53,13 +53,88 @@ class ChangeLogTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(self.db.get_row("customers", row_id)["name"], "Ali")
 
+    def test_redo_replays_multiple_undone_changes_in_original_order(self) -> None:
+        self.db.create_table("customers")
+        self.log.log("create_table", "customers", "customers", after={"table": "customers"})
+        row_id = self.db.add_row("customers", "first")
+        self.log.log(
+            "add_row",
+            "customers",
+            str(row_id),
+            after={"row": self.db.get_row("customers", row_id), "position": 0},
+        )
+
+        ok, _, _ = self.log.undo_last()
+        self.assertTrue(ok)
+        ok, _, _ = self.log.undo_last()
+        self.assertTrue(ok)
+        self.assertEqual(self.db.list_tables(), [])
+
+        ok, _, table = self.log.redo_last()
+        self.assertTrue(ok)
+        self.assertEqual(table, "customers")
+        self.assertEqual(self.db.list_tables(), ["customers"])
+        ok, _, table = self.log.redo_last()
+        self.assertTrue(ok)
+        self.assertEqual(table, "customers")
+        self.assertEqual(self.db.fetch_rows("customers")[0]["_row_name"], "first")
+
     def test_table_delete_is_logged_but_not_undoable(self) -> None:
         self.log.log("delete_table", "customers", "customers", undoable=False)
 
         ok, message, _ = self.log.undo_last()
 
         self.assertFalse(ok)
-        self.assertIn("not available", message)
+        self.assertIn("blocked", message)
+        entry = self.log.entries()[0]
+        self.assertEqual(entry.status, "applied")
+        self.assertIsNone(entry.error_text)
+
+    def test_redo_is_blocked_after_table_delete_barrier(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        row_id = self.db.add_row("customers", "first")
+        self.db.update_cell("customers", row_id, "name", "Ali")
+        self.log.log(
+            "update_cell",
+            "customers",
+            f"{row_id}.name",
+            before={"row_id": row_id, "column": "name", "value": None},
+            after={"row_id": row_id, "column": "name", "value": "Ali"},
+        )
+        ok, _, _ = self.log.undo_last()
+        self.assertTrue(ok)
+
+        self.db.delete_table("customers")
+        self.csv_sync.delete_table_csv("customers")
+        self.log.log("delete_table", "customers", "customers", undoable=False)
+
+        ok, message, table = self.log.redo_last()
+
+        self.assertFalse(ok)
+        self.assertEqual(table, "customers")
+        self.assertIn("blocked", message)
+
+    def test_redo_is_blocked_after_database_session_barrier(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "name")
+        row_id = self.db.add_row("customers", "first")
+        self.db.update_cell("customers", row_id, "name", "Ali")
+        self.log.log(
+            "update_cell",
+            "customers",
+            f"{row_id}.name",
+            before={"row_id": row_id, "column": "name", "value": None},
+            after={"row_id": row_id, "column": "name", "value": "Ali"},
+        )
+        ok, _, _ = self.log.undo_last()
+        self.assertTrue(ok)
+        self.log.log("open_database", target="other.sqlite", undoable=False)
+
+        ok, message, _ = self.log.redo_last()
+
+        self.assertFalse(ok)
+        self.assertIn("database session changed", message)
 
     def test_undo_and_redo_table_rename(self) -> None:
         self.db.create_table("customers")

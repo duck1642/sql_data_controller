@@ -57,6 +57,22 @@ class DatabaseControllerTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.db.update_cell("customers", row_id, "id", "999")
 
+    def test_case_only_duplicate_table_names_are_rejected(self) -> None:
+        self.db.create_table("Customers")
+
+        with self.assertRaises(ValidationError):
+            self.db.create_table("customers")
+
+    def test_case_only_duplicate_column_names_are_rejected(self) -> None:
+        self.db.create_table("customers")
+        self.db.add_column("customers", "Name")
+        self.db.add_column("customers", "email")
+
+        with self.assertRaises(ValidationError):
+            self.db.add_column("customers", "name")
+        with self.assertRaises(ValidationError):
+            self.db.rename_column("customers", "email", "NAME")
+
     def test_rename_rejects_protected_and_duplicate_columns(self) -> None:
         self.db.create_table("customers")
         self.db.add_column("customers", "name")

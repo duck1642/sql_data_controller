@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import sqlite3
 from collections import OrderedDict
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -90,15 +92,22 @@ def backup_sqlite_database(db: DatabaseController, path: str | Path) -> Path:
     temp_path = output_path.with_name(f".{output_path.name}.backup_tmp")
     _remove_sqlite_backup_files(temp_path)
     try:
-        with sqlite3.connect(temp_path) as destination:
-            db.connection.backup(destination)
-        _finalize_sqlite_backup_file(temp_path)
-        _remove_sqlite_backup_files(output_path)
-        temp_path.replace(output_path)
-    except sqlite3.Error:
+        try:
+            with closing(sqlite3.connect(temp_path)) as destination:
+                db.connection.backup(destination)
+                destination.commit()
+        except sqlite3.Error:
+            _remove_sqlite_backup_files(temp_path)
+            temp_path.write_bytes(db.connection.serialize())
+        _remove_sqlite_sidecar_files(output_path)
+        try:
+            temp_path.replace(output_path)
+        except PermissionError:
+            _copy_backup_into_place(temp_path, output_path)
         _remove_sqlite_backup_files(temp_path)
-        output_path.write_bytes(db.connection.serialize())
-        _finalize_sqlite_backup_file(output_path)
+    except Exception:
+        _remove_sqlite_backup_files(temp_path)
+        raise
     return output_path
 
 
@@ -176,14 +185,39 @@ def _worksheet_title(table_name: str, used_titles: set[str]) -> str:
     return title
 
 
-def _finalize_sqlite_backup_file(path: Path) -> None:
-    with sqlite3.connect(path) as connection:
-        connection.execute("PRAGMA journal_mode = TRUNCATE")
-
-
 def _remove_sqlite_backup_files(path: Path) -> None:
     for candidate in (
         path,
+        path.with_name(f"{path.name}-journal"),
+        path.with_name(f"{path.name}-wal"),
+        path.with_name(f"{path.name}-shm"),
+    ):
+        try:
+            candidate.unlink()
+        except (FileNotFoundError, PermissionError):
+            pass
+
+
+def _copy_backup_into_place(temp_path: Path, output_path: Path) -> None:
+    preserve_path = output_path.with_name(f".{output_path.name}.preserve_tmp")
+    _remove_sqlite_backup_files(preserve_path)
+    try:
+        if output_path.exists():
+            shutil.copy2(output_path, preserve_path)
+        shutil.copy2(temp_path, output_path)
+    except Exception:
+        if preserve_path.exists():
+            try:
+                shutil.copy2(preserve_path, output_path)
+            except Exception:
+                pass
+        raise
+    finally:
+        _remove_sqlite_backup_files(preserve_path)
+
+
+def _remove_sqlite_sidecar_files(path: Path) -> None:
+    for candidate in (
         path.with_name(f"{path.name}-journal"),
         path.with_name(f"{path.name}-wal"),
         path.with_name(f"{path.name}-shm"),

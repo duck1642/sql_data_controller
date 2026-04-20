@@ -43,8 +43,8 @@ def main() -> int:
     window.show()
 
     exit_code = app.exec()
-    app_logger.info("app", "shutdown", "success", "Application closed.", db=str(db.db_path), exit_code=exit_code)
-    db.close()
+    app_logger.info("app", "shutdown", "success", "Application closed.", db=str(window.db.db_path), exit_code=exit_code)
+    window.db.close()
     return exit_code
 
 

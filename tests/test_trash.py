@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import unittest
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 from app.csv_sync import CsvSync
@@ -55,7 +56,7 @@ class TrashSnapshotTests(unittest.TestCase):
         self.assertEqual(csv_rows[0], ["name", "_row_name", "id"])
         self.assertEqual(csv_rows[1], ["Ayse", "second", "2"])
 
-        with sqlite3.connect(snapshot.sqlite_path) as connection:
+        with closing(sqlite3.connect(snapshot.sqlite_path)) as connection:
             connection.row_factory = sqlite3.Row
             tables = {
                 row["name"]

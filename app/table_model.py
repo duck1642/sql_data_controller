@@ -77,7 +77,7 @@ class DatabaseTableModel(QAbstractTableModel):
 
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             return text
-        if self._cell_matches_search(text):
+        if self._cell_should_highlight(text):
             if role == Qt.ItemDataRole.BackgroundRole:
                 return QBrush(SEARCH_MATCH_BACKGROUND)
             if role == Qt.ItemDataRole.ForegroundRole:
@@ -182,8 +182,11 @@ class DatabaseTableModel(QAbstractTableModel):
         return any(self._cell_matches_search("" if row.get(column) is None else str(row.get(column))) for column in self.columns)
 
     def _cell_matches_search(self, text: str) -> bool:
-        if not self.search_text or not self.search_highlight_enabled and not self.filter_enabled:
+        if not self.search_text:
             return False
         if self.case_sensitive:
             return self.search_text in text
         return self.search_text.lower() in text.lower()
+
+    def _cell_should_highlight(self, text: str) -> bool:
+        return self.search_highlight_enabled and self._cell_matches_search(text)

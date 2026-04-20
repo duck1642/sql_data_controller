@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ class TableTrashSnapshot:
     sqlite_path: Path
     csv_path: Path
     manifest_path: Path
+    columns: list[str]
+    row_count: int
+    column_count: int
 
 
 def create_table_trash_snapshot(
@@ -60,7 +64,16 @@ def create_table_trash_snapshot(
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return TableTrashSnapshot(name, snapshot_dir, sqlite_path, csv_path, manifest_path)
+    return TableTrashSnapshot(
+        name,
+        snapshot_dir,
+        sqlite_path,
+        csv_path,
+        manifest_path,
+        columns,
+        len(rows),
+        len(columns),
+    )
 
 
 def _trash_tables_dir(db: DatabaseController, trash_root: str | Path | None) -> Path:
@@ -91,7 +104,7 @@ def _write_table_sqlite_snapshot(
     rows: list[dict[str, Any]],
     sqlite_path: Path,
 ) -> None:
-    with sqlite3.connect(sqlite_path) as connection:
+    with closing(sqlite3.connect(sqlite_path)) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode = TRUNCATE")
         _create_metadata_tables(connection)

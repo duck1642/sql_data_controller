@@ -79,6 +79,19 @@ class MainWindowTests(unittest.TestCase):
         self.assertEqual(failure["status"], "failed")
         self.assertEqual(failure["error_type"], "RuntimeError")
 
+    def test_new_database_rejects_existing_file(self) -> None:
+        existing_db = self.temp_dir / "existing.sqlite"
+        existing_db.write_text("not empty", encoding="utf-8")
+        original_db_path = self.window.db.db_path
+        messages: list[str] = []
+        self.window.show_error = messages.append
+
+        with patch("app.main_window.QFileDialog.getSaveFileName", return_value=(str(existing_db), "")):
+            self.window.new_database()
+
+        self.assertEqual(self.window.db.db_path, original_db_path)
+        self.assertEqual(messages, ["Database already exists. Use Open DB to open an existing database."])
+
     def test_delete_table_creates_trash_snapshot_before_real_delete(self) -> None:
         self.db.create_table("customers")
         self.db.add_column("customers", "name")
@@ -95,6 +108,11 @@ class MainWindowTests(unittest.TestCase):
         self.assertTrue((snapshots[0] / "table.sqlite").exists())
         self.assertTrue((snapshots[0] / "table.csv").exists())
         self.assertTrue((snapshots[0] / "manifest.json").exists())
+        delete_entry = self.window.change_log.entries()[0]
+        self.assertFalse(delete_entry.undoable)
+        self.assertNotIn("rows", delete_entry.before)
+        self.assertEqual(delete_entry.before["row_count"], 1)
+        self.assertEqual(delete_entry.before["trash_snapshot"], str(snapshots[0]))
 
     def read_log_records(self) -> list[dict]:
         records: list[dict] = []

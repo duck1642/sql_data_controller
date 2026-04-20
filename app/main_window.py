@@ -480,7 +480,11 @@ class MainWindow(QMainWindow):
         )
         if not file_name:
             return
-        self.switch_database(Path(file_name), "new_database")
+        db_path = Path(file_name)
+        if db_path.exists():
+            self.show_error("Database already exists. Use Open DB to open an existing database.")
+            return
+        self.switch_database(db_path, "new_database")
 
     def open_database(self) -> None:
         file_name, _ = QFileDialog.getOpenFileName(
@@ -753,7 +757,6 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            columns, rows = self.db.fetch_table_data(table)
             snapshot = create_table_trash_snapshot(self.db, self.csv_sync, table)
             self.db.delete_table(table)
             self.csv_sync.delete_table_csv(table)
@@ -763,9 +766,12 @@ class MainWindow(QMainWindow):
                 table,
                 before={
                     "table": table,
-                    "columns": columns,
-                    "rows": rows,
+                    "columns": snapshot.columns,
+                    "row_count": snapshot.row_count,
+                    "column_count": snapshot.column_count,
                     "trash_snapshot": str(snapshot.snapshot_dir),
+                    "sqlite_snapshot": str(snapshot.sqlite_path),
+                    "csv_snapshot": str(snapshot.csv_path),
                 },
                 undoable=False,
             )

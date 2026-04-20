@@ -35,13 +35,16 @@ class DatabaseController:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.db_path)
+        self._closed = False
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode = TRUNCATE")
         self.connection.execute("PRAGMA foreign_keys = ON")
         self._ensure_metadata_tables()
 
     def close(self) -> None:
-        self.connection.close()
+        if not self._closed:
+            self.connection.close()
+            self._closed = True
 
     def list_tables(self) -> list[str]:
         rows = self.connection.execute(
@@ -59,7 +62,7 @@ class DatabaseController:
     def table_exists(self, table_name: str) -> bool:
         name = validate_identifier(table_name, "table name")
         row = self.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?)",
             (name,),
         ).fetchone()
         return row is not None
@@ -156,7 +159,7 @@ class DatabaseController:
     def delete_table(self, table_name: str) -> None:
         self._require_table(table_name)
         name = validate_identifier(table_name, "table name")
-        if name.startswith(RESERVED_TABLE_PREFIX):
+        if name.casefold().startswith(RESERVED_TABLE_PREFIX):
             raise ValidationError(f"Table names starting with {RESERVED_TABLE_PREFIX} are protected.")
         table_sql = quote_identifier(name)
 
@@ -351,7 +354,7 @@ class DatabaseController:
     def add_column(self, table_name: str, column_name: str) -> None:
         self._require_table(table_name)
         name = validate_user_column_name(column_name)
-        if name in self.get_column_names(table_name):
+        if self._name_exists_case_insensitive(self.get_column_names(table_name), name):
             raise ValidationError(f"Column '{name}' already exists.")
 
         table_sql = quote_identifier(table_name)
@@ -376,7 +379,7 @@ class DatabaseController:
             raise ValidationError(f"Column '{old_column}' is protected.")
         if old_column not in columns:
             raise ValidationError(f"Column '{old_column}' does not exist.")
-        if new_column in columns:
+        if self._name_exists_case_insensitive(columns, new_column):
             raise ValidationError(f"Column '{new_column}' already exists.")
 
         table_sql = quote_identifier(table_name)
@@ -556,9 +559,13 @@ class DatabaseController:
 
     def _validate_new_table_name(self, table_name: str) -> str:
         name = validate_identifier(table_name, "table name")
-        if name.startswith(RESERVED_TABLE_PREFIX):
+        if name.casefold().startswith(RESERVED_TABLE_PREFIX):
             raise ValidationError(f"Table names cannot start with {RESERVED_TABLE_PREFIX}.")
         return name
+
+    def _name_exists_case_insensitive(self, existing_names: list[str], candidate: str) -> bool:
+        candidate_key = candidate.casefold()
+        return any(existing.casefold() == candidate_key for existing in existing_names)
 
     def _column_definition(self, column_name: str) -> str:
         column_sql = quote_identifier(column_name)
